@@ -8,12 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
 	//	"github.com/davecgh/go-spew/spew"
-	"github.com/gabstv/go-monero/walletrpc"
-	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
-	qrcode "github.com/skip2/go-qrcode"
-	"golang.org/x/crypto/bcrypt"
 	"html"
 	"io"
 	"io/ioutil"
@@ -34,6 +30,12 @@ import (
 	"text/template"
 	"time"
 	"unicode/utf8"
+
+	"github.com/gabstv/go-monero/walletrpc"
+	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3"
+	qrcode "github.com/skip2/go-qrcode"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const username = "admin"
@@ -157,65 +159,6 @@ func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	} else {
 		return false
-	}
-}
-
-// Handler function for the "/donations" endpoint
-func donationsHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("donationsHandler Called")
-	checkLoggedIn(w, r)
-	// Fetch the latest data from your database or other data source
-
-	// Retrieve data from the donos table
-	rows, err := db.Query("SELECT * FROM donos WHERE fulfilled = 1 AND amount_sent != '0.0' ORDER BY created_at DESC")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	// Create a slice to hold the data
-	var donos []utils.Dono
-	for rows.Next() {
-		var dono utils.Dono
-		var name, message, address, currencyType, encryptedIP, amountToSend, amountSent, mediaURL sql.NullString
-		var usdAmount sql.NullFloat64
-		var userID sql.NullInt64
-		var anonDono, fulfilled sql.NullBool
-		err := rows.Scan(&dono.ID, &userID, &address, &name, &message, &amountToSend, &amountSent, &currencyType, &anonDono, &fulfilled, &encryptedIP, &dono.CreatedAt, &dono.UpdatedAt, &usdAmount, &mediaURL)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		dono.UserID = int(userID.Int64)
-		dono.Address = address.String
-		dono.Name = name.String
-		dono.Message = message.String
-		dono.AmountToSend = amountToSend.String
-		dono.AmountSent = amountSent.String
-		dono.CurrencyType = currencyType.String
-		dono.AnonDono = anonDono.Bool
-		dono.Fulfilled = fulfilled.Bool
-		dono.EncryptedIP = encryptedIP.String
-		dono.USDAmount = usdAmount.Float64
-		dono.MediaURL = mediaURL.String
-
-		donos = append(donos, dono)
-	}
-
-	if err = rows.Err(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	data := donos
-
-	// Execute the table template with the latest data
-	err = tableTemplate.Execute(w, data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
 }
 
@@ -346,78 +289,78 @@ func mapToCryptosEnabled(selectedCryptos map[string]bool) utils.CryptosEnabled {
 }
 func setupRoutes() {
 	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/style.css")
+		http.ServeFile(w, r, "web/templates/style.css")
 	})
 
 	http.HandleFunc("/xmr.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/xmr.svg")
+		http.ServeFile(w, r, "web/templates/xmr.svg")
 	})
 
 	http.HandleFunc("/bignumber.js", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/js/bignumber.js")
+		http.ServeFile(w, r, "web/templates/js/bignumber.js")
 	})
 
 	http.HandleFunc("/checkmark.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/xmr.png")
+		http.ServeFile(w, r, "web/templates/xmr.png")
 	})
 
 	http.HandleFunc("/fcash.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/fcash.png")
+		http.ServeFile(w, r, "web/templates/fcash.png")
 	})
 
 	http.HandleFunc("/indexfcash.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/indexfcash.png")
+		http.ServeFile(w, r, "web/templates/indexfcash.png")
 	})
 
 	http.HandleFunc("/loader.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/loader.svg")
+		http.ServeFile(w, r, "web/templates/loader.svg")
 	})
 
 	http.HandleFunc("/eth.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/eth.svg")
+		http.ServeFile(w, r, "web/templates/eth.svg")
 	})
 
 	http.HandleFunc("/sol.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/sol.svg")
+		http.ServeFile(w, r, "web/templates/sol.svg")
 	})
 
 	http.HandleFunc("/busd.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/busd.svg")
+		http.ServeFile(w, r, "web/templates/busd.svg")
 	})
 
 	http.HandleFunc("/hex.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/hex.svg")
+		http.ServeFile(w, r, "web/templates/hex.svg")
 	})
 
 	http.HandleFunc("/matic.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/matic.svg")
+		http.ServeFile(w, r, "web/templates/matic.svg")
 	})
 
 	http.HandleFunc("/paint.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/paint.svg")
+		http.ServeFile(w, r, "web/templates/paint.svg")
 	})
 
 	http.HandleFunc("/pnk.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/pnk.svg")
+		http.ServeFile(w, r, "web/templates/pnk.svg")
 	})
 
 	http.HandleFunc("/shiba_inu.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/shiba_inu.svg")
+		http.ServeFile(w, r, "web/templates/shiba_inu.svg")
 	})
 
 	http.HandleFunc("/tether.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/tether.svg")
+		http.ServeFile(w, r, "web/templates/tether.svg")
 	})
 
 	http.HandleFunc("/usdc.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/usdc.svg")
+		http.ServeFile(w, r, "web/templates/usdc.svg")
 	})
 
 	http.HandleFunc("/wbtc.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/wbtc.svg")
+		http.ServeFile(w, r, "web/templates/wbtc.svg")
 	})
 
-	http.Handle("/media/", http.StripPrefix("/media/", http.FileServer(http.Dir("web/obs/media/"))))
+	http.Handle("/media/", http.StripPrefix("/media/", http.FileServer(http.Dir("web/templates/obs/media/"))))
 	http.Handle("/users/", http.StripPrefix("/users/", http.FileServer(http.Dir("users/"))))
 
 	routes_ = []Route_{
@@ -452,27 +395,27 @@ func setupRoutes() {
 		http.HandleFunc(route_.Path, route_.Handler)
 	}
 
-	indexTemplate, _ = template.ParseFiles("web/index.html")
-	tosTemplate, _ = template.ParseFiles("web/tos.html")
-	registerTemplate, _ = template.ParseFiles("web/new_account.html")
-	donationTemplate, _ = template.ParseFiles("web/donation.html")
-	footerTemplate, _ = template.ParseFiles("web/footer.html")
-	payTemplate, _ = template.ParseFiles("web/pay.html")
-	alertTemplate, _ = template.ParseFiles("web/alert.html")
-	accountPayTemplate, _ = template.ParseFiles("web/accountpay.html")
+	indexTemplate, _ = template.ParseFiles("web/templates/index.html")
+	tosTemplate, _ = template.ParseFiles("web/templates/tos.html")
+	registerTemplate, _ = template.ParseFiles("web/templates/new_account.html")
+	donationTemplate, _ = template.ParseFiles("web/templates/donation.html")
+	footerTemplate, _ = template.ParseFiles("web/templates/footer.html")
+	payTemplate, _ = template.ParseFiles("web/templates/pay.html")
+	alertTemplate, _ = template.ParseFiles("web/templates/alert.html")
+	accountPayTemplate, _ = template.ParseFiles("web/templates/accountpay.html")
 
-	billPayTemplate, _ = template.ParseFiles("web/billpay.html")
+	billPayTemplate, _ = template.ParseFiles("web/templates/billpay.html")
 
-	userOBSTemplate, _ = template.ParseFiles("web/obs/settings.html")
-	progressbarTemplate, _ = template.ParseFiles("web/obs/progressbar.html")
+	userOBSTemplate, _ = template.ParseFiles("web/templates/obs/settings.html")
+	progressbarTemplate, _ = template.ParseFiles("web/templates/obs/progressbar.html")
 
-	loginTemplate, _ = template.ParseFiles("web/login.html")
-	incorrectLoginTemplate, _ = template.ParseFiles("web/incorrect_login.html")
-	userTemplate, _ = template.ParseFiles("web/user.html")
-	cryptoSettingsTemplate, _ = template.ParseFiles("web/cryptoselect.html")
+	loginTemplate, _ = template.ParseFiles("web/templates/login.html")
+	incorrectLoginTemplate, _ = template.ParseFiles("web/templates/incorrect_login.html")
+	userTemplate, _ = template.ParseFiles("web/templates/user.html")
+	cryptoSettingsTemplate, _ = template.ParseFiles("web/templates/cryptoselect.html")
 
-	logoutTemplate, _ = template.ParseFiles("web/logout.html")
-	incorrectPasswordTemplate, _ = template.ParseFiles("web/password_change_failed.html")
+	logoutTemplate, _ = template.ParseFiles("web/templates/logout.html")
+	incorrectPasswordTemplate, _ = template.ParseFiles("web/templates/password_change_failed.html")
 }
 
 func startWallets() {
@@ -550,7 +493,7 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Parse the HTML template and execute it with the data
-		tmpl, err := template.ParseFiles("web/view_users.html")
+		tmpl, err := template.ParseFiles("web/templates/view_users.html")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -936,7 +879,7 @@ func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send the data to the template
-	tpl, err := template.ParseFiles("web/view_donos.html")
+	tpl, err := template.ParseFiles("web/templates/view_donos.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2676,7 +2619,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user", http.StatusFound)
 		return
 	}
-	tmpl := template.Must(template.ParseFiles("web/login.html"))
+	tmpl := template.Must(template.ParseFiles("web/templates/login.html"))
 	err := tmpl.Execute(w, nil)
 	if err != nil {
 		log.Println(err)
@@ -2785,7 +2728,7 @@ func userOBSHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println(obsData.URLdonobar)
 	log.Println(obsData.URLdisplay)
 
-	tmpl, err := template.ParseFiles("web/obs/settings.html")
+	tmpl, err := template.ParseFiles("web/templates/obs/settings.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2842,7 +2785,7 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 		Links: user.Links, // Convert byte slice to string
 	}
 
-	tmpl, err := template.ParseFiles("web/user.html")
+	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2901,7 +2844,7 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 			// set user page data values
 			data.ErrorMessage = "Current password entered was incorrect"
 			// render password change failed form
-			tmpl, err := template.ParseFiles("web/password_change_failed.html")
+			tmpl, err := template.ParseFiles("web/templates/password_change_failed.html")
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -2929,7 +2872,7 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// render change password form
-	tmpl, err := template.ParseFiles("web/user.html")
+	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3035,7 +2978,7 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// render change password form
-	tmpl, err := template.ParseFiles("web/user.html")
+	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3109,7 +3052,7 @@ func changeUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// render change password form
-	tmpl, err := template.ParseFiles("web/user.html")
+	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3133,7 +3076,7 @@ func saveFileToDisk(file multipart.File, header *multipart.FileHeader, path stri
 }
 
 func renderChangePasswordForm(w http.ResponseWriter, data utils.UserPageData) {
-	tmpl, err := template.ParseFiles("web/user.html")
+	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3154,7 +3097,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func incorrectLoginHandler(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.Must(template.ParseFiles("web/incorrect_login.html"))
+	tmpl := template.Must(template.ParseFiles("web/templates/incorrect_login.html"))
 	err := tmpl.Execute(w, nil)
 	if err != nil {
 		log.Println(err)
@@ -3430,7 +3373,7 @@ func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			MoneroWalletKeysString: moneroWalletKeysString,
 		}
 
-		tmpl, err := template.ParseFiles("web/cryptoselect.html")
+		tmpl, err := template.ParseFiles("web/templates/cryptoselect.html")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
