@@ -162,6 +162,65 @@ func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request) bool {
 	}
 }
 
+// Handler function for the "/donations" endpoint
+func donationsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("donationsHandler Called")
+	checkLoggedIn(w, r)
+	// Fetch the latest data from your database or other data source
+
+	// Retrieve data from the donos table
+	rows, err := db.Query("SELECT * FROM donos WHERE fulfilled = 1 AND amount_sent != '0.0' ORDER BY created_at DESC")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// Create a slice to hold the data
+	var donos []utils.Dono
+	for rows.Next() {
+		var dono utils.Dono
+		var name, message, address, currencyType, encryptedIP, amountToSend, amountSent, mediaURL sql.NullString
+		var usdAmount sql.NullFloat64
+		var userID sql.NullInt64
+		var anonDono, fulfilled sql.NullBool
+		err := rows.Scan(&dono.ID, &userID, &address, &name, &message, &amountToSend, &amountSent, &currencyType, &anonDono, &fulfilled, &encryptedIP, &dono.CreatedAt, &dono.UpdatedAt, &usdAmount, &mediaURL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		dono.UserID = int(userID.Int64)
+		dono.Address = address.String
+		dono.Name = name.String
+		dono.Message = message.String
+		dono.AmountToSend = amountToSend.String
+		dono.AmountSent = amountSent.String
+		dono.CurrencyType = currencyType.String
+		dono.AnonDono = anonDono.Bool
+		dono.Fulfilled = fulfilled.Bool
+		dono.EncryptedIP = encryptedIP.String
+		dono.USDAmount = usdAmount.Float64
+		dono.MediaURL = mediaURL.String
+
+		donos = append(donos, dono)
+	}
+
+	if err = rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := donos
+
+	// Execute the table template with the latest data
+	err = tableTemplate.Execute(w, data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 func main() {
 
 	var err error

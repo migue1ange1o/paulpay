@@ -3,13 +3,16 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/shopspring/decimal"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 var contracts = map[string]string{
@@ -190,7 +193,7 @@ func CheckDonos(transfers []Transfer, pending_donos []SuperChat) []SuperChat {
 
 	fmt.Println("Completed Donations:")
 	for _, dono := range completed_donos {
-		fmt.Printf("Amount: %.18f %v, Completed: %v, Checked At: %v\n", dono.CryptoCode, dono.AmountNeeded, dono.Completed, dono.CheckedAt)
+		fmt.Printf("Amount: %s %v, Completed: %v, Checked At: %v\n", dono.CryptoCode, dono.AmountNeeded, dono.Completed, dono.CheckedAt)
 	}
 
 	return completed_donos
@@ -244,4 +247,89 @@ func GenerateUniqueURL() string {
 		randomString[i] = charset[rand.Intn(len(charset))]
 	}
 	return (string(randomString))
+}
+
+// extractVideoID extracts the video ID from a YouTube URL
+func ExtractVideoID(url string) string {
+	videoID := ""
+	// Use a regular expression to extract the video ID from the YouTube URL
+	re := regexp.MustCompile(`v=([\w-]+)`)
+	match := re.FindStringSubmatch(url)
+	if len(match) == 2 {
+		videoID = match[1]
+	}
+	return videoID
+}
+
+func ReturnIPPenalty(ips []string, currentDonoIP string) float64 {
+	// Check if the encrypted IP matches any of the encrypted IPs in the slice of donos
+	sameIPCount := 0
+	for _, donoIP := range ips {
+		if donoIP == currentDonoIP {
+			sameIPCount++
+		}
+	}
+	// Calculate the exponential delay factor based on the number of matching IPs
+	expoAdder := 1.00
+	if sameIPCount > 2 {
+		expoAdder = math.Pow(1.3, float64(sameIPCount)) / 1.3
+	}
+	return expoAdder
+}
+
+func IsYouTubeLink(link string) (bool, int, string) {
+	var timecode int
+	var properLink string
+
+	youtubeRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([^&]+)(?:\?t=)?(\d*)$`)
+	embedRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?youtube\.com/embed/([^?]+)(?:\?start=)?(\d*)$`)
+
+	if youtubeMatches := youtubeRegex.FindStringSubmatch(link); youtubeMatches != nil {
+		if len(youtubeMatches[2]) > 0 {
+			fmt.Sscanf(youtubeMatches[2], "%d", &timecode)
+		}
+		properLink = "https://www.youtube.com/watch?v=" + youtubeMatches[1]
+		return true, timecode, properLink
+	}
+
+	if embedMatches := embedRegex.FindStringSubmatch(link); embedMatches != nil {
+		if len(embedMatches[2]) > 0 {
+			fmt.Sscanf(embedMatches[2], "%d", &timecode)
+		}
+		properLink = "https://www.youtube.com/watch?v=" + embedMatches[1]
+		return true, timecode, properLink
+	}
+
+	return false, 0, ""
+}
+
+// should go in /models/media.go
+func FormatMediaURL(media_url string) string {
+	isValid, timecode, properLink := IsYouTubeLink(media_url)
+	log.Println(isValid, timecode, properLink)
+
+	embedLink := ""
+	if isValid {
+		videoID := ExtractVideoID(properLink)
+		embedLink = fmt.Sprintf(videoID)
+	}
+	return embedLink
+}
+
+func CheckDonoForMediaUSDThreshold(media_url string, dono_usd float64, minDono int) (bool, string) {
+	valid := true
+	if dono_usd < float64(minDono) {
+		media_url = ""
+		valid = false
+
+	}
+	return valid, media_url
+}
+
+func ConvertToFloat64(value string) float64 {
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		panic(err)
+	}
+	return f
 }
