@@ -111,13 +111,13 @@ var firstRun bool = true
 // Mainnet
 var solClient = client.NewClient("https://api.mainnet-beta.solana.com")
 
-func StartMonitoringSolana() {
+func (sr *SolRepository) StartMonitoringSolana() {
 	for {
-		getTransactionsForAddresses()
+		sr.getTransactionsForAddresses()
 	}
 }
 
-func CheckTransactionSolana(amt string, addr string, max_depth int) bool {
+func (sr *SolRepository) CheckTransactionSolana(amt string, addr string, max_depth int) bool {
 	decAmountReceived, _ := decimal.NewFromString(amt)
 	decMultiplier := decimal.NewFromFloat(1000000000)
 	result := decAmountReceived.Mul(decMultiplier)
@@ -139,14 +139,15 @@ func CheckTransactionSolana(amt string, addr string, max_depth int) bool {
 	return false
 }
 
-func SetSolWallets(sW map[int]SolWallet) {
+func (sr *SolRepository) SetSolWallets(sW map[int]SolWallet) {
 	solWallets = sW
 }
-func getTransactionsForAddresses() {
+
+func (sr *SolRepository) getTransactionsForAddresses() {
 	for _, wallet := range solWallets {
 		sameBalance := false
 
-		wallet, sameBalance = checkSameBalanceSol(wallet)
+		wallet, sameBalance = sr.checkSameBalanceSol(wallet)
 
 		if sameBalance {
 			fmt.Println("SOL:", wallet.Address[:7]+".. no new txs.")
@@ -162,9 +163,9 @@ func getTransactionsForAddresses() {
 				panic(err)
 			}
 			for _, sig := range out {
-				tAmount, newTrans := getTransactionAmount(sig.Signature.String(), wallet.Address)
+				tAmount, newTrans := sr.getTransactionAmount(sig.Signature.String(), wallet.Address)
 				if newTrans {
-					addSolanaTransaction(wallet.Address, sig.Signature.String(), tAmount)
+					sr.addSolanaTransaction(wallet.Address, sig.Signature.String(), tAmount)
 				} else {
 					fmt.Println("SOL: No new", wallet.Address[:7]+"... txs.")
 				}
@@ -177,7 +178,7 @@ func getTransactionsForAddresses() {
 
 }
 
-func getTransactionsForAddressesFirst() {
+func (sr *SolRepository) getTransactionsForAddressesFirst() {
 	for _, wallet := range solWallets {
 		endpoint := rpc.MainNetBeta_RPC
 		client := rpc.New(endpoint)
@@ -190,7 +191,7 @@ func getTransactionsForAddressesFirst() {
 		}
 
 		for _, sig := range out {
-			addSolanaTransactionStart(wallet.Address, sig.Signature.String())
+			sr.addSolanaTransactionStart(wallet.Address, sig.Signature.String())
 		}
 
 		time.Sleep(5 * time.Second)
@@ -198,7 +199,7 @@ func getTransactionsForAddressesFirst() {
 
 }
 
-func addSolanaTransactionStart(addr, sig string) {
+func (sr *SolRepository) addSolanaTransactionStart(addr, sig string) {
 	// Create a new transaction object
 	transaction := Transaction{
 		Address:   addr,
@@ -207,7 +208,7 @@ func addSolanaTransactionStart(addr, sig string) {
 	transactions = append(transactions, transaction)
 }
 
-func addSolanaTransaction(addr, sig string, amount int64) {
+func (sr *SolRepository) addSolanaTransaction(addr, sig string, amount int64) {
 	// Create a new transaction object
 	transaction := Transaction{
 		Address:   addr,
@@ -222,7 +223,7 @@ func addSolanaTransaction(addr, sig string, amount int64) {
 	transactions = append(transactions, transaction)
 }
 
-func CreatePendingSolDono(name string, message string, mediaURL string, amountNeeded float64) SuperChat {
+func (sr *SolRepository) CreatePendingSolDono(name string, message string, mediaURL string, amountNeeded float64) SuperChat {
 	pendingDono := SuperChat{
 		Name:         name,
 		Message:      message,
@@ -236,7 +237,7 @@ func CreatePendingSolDono(name string, message string, mediaURL string, amountNe
 	return pendingDono
 }
 
-func containsTransaction(sig string) bool {
+func (sr *SolRepository) containsTransaction(sig string) bool {
 	// searches in reverse order in order to search newest transactions first to avoid needless loops
 	for i := len(transactions) - 1; i >= 0; i-- {
 		if transactions[i].Signature == sig {
@@ -246,8 +247,8 @@ func containsTransaction(sig string) bool {
 	return false
 }
 
-func checkSameBalanceSol(wallet SolWallet) (SolWallet, bool) {
-	amt, _ := getSOLBalance(wallet.Address)
+func (sr *SolRepository) checkSameBalanceSol(wallet SolWallet) (SolWallet, bool) {
+	amt, _ := sr.getSOLBalance(wallet.Address)
 	if wallet.Amount <= 1 {
 		wallet.Amount = amt
 		return wallet, true
@@ -261,7 +262,7 @@ func checkSameBalanceSol(wallet SolWallet) (SolWallet, bool) {
 
 }
 
-func getSOLBalance(address string) (float64, error) {
+func (sr *SolRepository) getSOLBalance(address string) (float64, error) {
 	balance, err := solClient.GetBalance(
 		context.TODO(), // request context
 		address,        // wallet to fetch balance for
@@ -272,7 +273,7 @@ func getSOLBalance(address string) (float64, error) {
 	return float64(balance) / 1e9, nil
 }
 
-func getTransactionAmount(sig, addr string) (int64, bool) {
+func (sr *SolRepository) getTransactionAmount(sig, addr string) (int64, bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("Recovered from panic:", r)
@@ -281,7 +282,7 @@ func getTransactionAmount(sig, addr string) (int64, bool) {
 		}
 	}()
 
-	if !containsTransaction(sig) {
+	if !sr.containsTransaction(sig) {
 		url := "https://api.mainnet-beta.solana.com"
 		requestBody := fmt.Sprintf(`
   {
@@ -345,7 +346,7 @@ func getTransactionAmount(sig, addr string) (int64, bool) {
 	return 0, false
 }
 
-func printSolTx(fromAddr, checkAddr, toAddr string, amountSent int64, sig string) {
+func (sr *SolRepository) printSolTx(fromAddr, checkAddr, toAddr string, amountSent int64, sig string) {
 
 	decAmountSent := decimal.NewFromInt(amountSent)
 	decMultiplier := decimal.NewFromFloat(0.000000001)

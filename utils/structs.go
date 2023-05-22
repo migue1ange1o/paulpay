@@ -36,6 +36,17 @@ type SuperChat struct {
 	CreatedAt    string
 	CheckedAt    string
 	CryptoCode   string
+	EncryptedIP  string
+}
+
+type Donation struct {
+	ID              string `json:"donoID"`
+	DonationName    string `json:"donationName"`
+	DonationMessage string `json:"donationMessage"`
+	DonationMedia   string `json:"donationMedia"`
+	USDValue        string `json:"usdValue"`
+	AmountSent      string `json:"amountSent"`
+	Crypto          string `json:"crypto"`
 }
 
 type User struct {
@@ -69,8 +80,10 @@ type User struct {
 	MinPnk               float64
 	DateEnabled          time.Time
 	WalletUploaded       bool
+	WalletPending        bool
 	CryptosEnabled       CryptosEnabled
 	BillingData          BillingData
+	DefaultCrypto        string
 }
 
 type RawContract struct {
@@ -214,9 +227,11 @@ type IndexDisplay struct {
 	ShibPrice      float64
 	PnkPrice       float64
 	MinAmnt        float64
+	WalletPending  bool
 	Links          string
 	Checked        string
 	CryptosEnabled CryptosEnabled
+	DefaultCrypto  string
 	Username       string
 }
 

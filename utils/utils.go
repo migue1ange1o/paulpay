@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var contracts = map[string]string{
@@ -82,6 +85,17 @@ func GetTransactionAmount(t Transfer) string {
 	return d.String()
 }
 
+func IsPortOpen(port int) bool {
+	address := fmt.Sprintf("%s:%d", "http://127.0.0.1", port)
+	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
+	if err != nil {
+		// Port is closed or unreachable
+		return false
+	}
+	defer conn.Close()
+	return true
+}
+
 func GetTransactionToken(t Transfer) string {
 	asset := ""
 	if t.RawContract.Address == "" {
@@ -117,7 +131,7 @@ func GetCryptoPrices() (CryptoPrice, error) {
 	url := "https://api.coingecko.com/api/v3/simple/price?ids=monero,solana,ethereum,paint,hex,matic-network,binance-usd,shiba-inu,kleros&vs_currencies=usd"
 	resp, err := http.Get(url)
 	if err != nil {
-		panic(err)
+		return prices, err
 	}
 	defer resp.Body.Close()
 
@@ -199,7 +213,7 @@ func CheckDonos(transfers []Transfer, pending_donos []SuperChat) []SuperChat {
 	return completed_donos
 }
 
-func CreatePendingDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string) SuperChat {
+func CreatePendingDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) SuperChat {
 	amountNeeded = FuzzDono(amountNeeded, cryptoCode)
 	pendingDono := SuperChat{
 		Name:         name,
@@ -210,6 +224,7 @@ func CreatePendingDono(name string, message string, mediaURL string, amountNeede
 		CreatedAt:    time.Now().String(),
 		CheckedAt:    time.Now().String(),
 		CryptoCode:   cryptoCode,
+		EncryptedIP:  encrypted_ip,
 	}
 	return pendingDono
 }
@@ -217,6 +232,21 @@ func CreatePendingDono(name string, message string, mediaURL string, amountNeede
 func AppendPendingDono(pending_donos []SuperChat, new_dono SuperChat) []SuperChat {
 	pending_donos = append(pending_donos, new_dono)
 	return pending_donos
+}
+
+func CheckPendingDonosFromIP(pending_donos []SuperChat, ip string) int {
+	matching_ips := 0
+	for _, dono := range pending_donos {
+		err := bcrypt.CompareHashAndPassword([]byte(dono.EncryptedIP), []byte(ip))
+
+		if err == nil {
+			matching_ips++
+			if matching_ips == 15 {
+				return matching_ips
+			}
+		}
+	}
+	return matching_ips
 }
 
 func CheckMatchingDono(amount float64, cryptoCode string, pending_donos []SuperChat) bool {
