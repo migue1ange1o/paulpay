@@ -8,8 +8,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -279,87 +277,31 @@ func GenerateUniqueURL() string {
 	return (string(randomString))
 }
 
-// extractVideoID extracts the video ID from a YouTube URL
-func ExtractVideoID(url string) string {
-	videoID := ""
-	// Use a regular expression to extract the video ID from the YouTube URL
-	re := regexp.MustCompile(`v=([\w-]+)`)
-	match := re.FindStringSubmatch(url)
-	if len(match) == 2 {
-		videoID = match[1]
+func GenerateUniqueCode() string {
+	rand.Seed(time.Now().UnixNano())
+	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	const length = 15
+	randomString := make([]byte, length)
+	for i := range randomString {
+		randomString[i] = charset[rand.Intn(len(charset))]
 	}
-	return videoID
+	return (string(randomString))
 }
 
-func ReturnIPPenalty(ips []string, currentDonoIP string) float64 {
-	// Check if the encrypted IP matches any of the encrypted IPs in the slice of donos
-	sameIPCount := 0
-	for _, donoIP := range ips {
-		if donoIP == currentDonoIP {
-			sameIPCount++
-		}
+func GenerateUniqueCodes(amount int) map[string]InviteCode {
+	inviteCodes := make(map[string]InviteCode)
+	for i := 0; i < amount; i++ {
+		cS := GenerateUniqueCode()
+		inviteCodes[cS] = InviteCode{Value: cS, Active: true}
 	}
-	// Calculate the exponential delay factor based on the number of matching IPs
-	expoAdder := 1.00
-	if sameIPCount > 2 {
-		expoAdder = math.Pow(1.3, float64(sameIPCount)) / 1.3
-	}
-	return expoAdder
+
+	return inviteCodes
 }
 
-func IsYouTubeLink(link string) (bool, int, string) {
-	var timecode int
-	var properLink string
-
-	youtubeRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([^&]+)(?:\?t=)?(\d*)$`)
-	embedRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?youtube\.com/embed/([^?]+)(?:\?start=)?(\d*)$`)
-
-	if youtubeMatches := youtubeRegex.FindStringSubmatch(link); youtubeMatches != nil {
-		if len(youtubeMatches[2]) > 0 {
-			fmt.Sscanf(youtubeMatches[2], "%d", &timecode)
-		}
-		properLink = "https://www.youtube.com/watch?v=" + youtubeMatches[1]
-		return true, timecode, properLink
+func AddInviteCodes(existingMap map[string]InviteCode, newMap map[string]InviteCode) map[string]InviteCode {
+	for key, value := range newMap {
+		existingMap[key] = value
 	}
 
-	if embedMatches := embedRegex.FindStringSubmatch(link); embedMatches != nil {
-		if len(embedMatches[2]) > 0 {
-			fmt.Sscanf(embedMatches[2], "%d", &timecode)
-		}
-		properLink = "https://www.youtube.com/watch?v=" + embedMatches[1]
-		return true, timecode, properLink
-	}
-
-	return false, 0, ""
-}
-
-// should go in /models/media.go
-func FormatMediaURL(media_url string) string {
-	isValid, timecode, properLink := IsYouTubeLink(media_url)
-	log.Println(isValid, timecode, properLink)
-
-	embedLink := ""
-	if isValid {
-		videoID := ExtractVideoID(properLink)
-		embedLink = fmt.Sprintf(videoID)
-	}
-	return embedLink
-}
-
-func CheckDonoForMediaUSDThreshold(media_url string, dono_usd float64, minDono int) (bool, string) {
-	valid := true
-	if dono_usd < float64(minDono) {
-		media_url = ""
-		valid = false
-
-	}
-	return valid, media_url
-}
-
-func ConvertToFloat64(value string) float64 {
-	f, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		panic(err)
-	}
-	return f
+	return existingMap
 }

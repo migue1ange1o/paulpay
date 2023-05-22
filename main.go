@@ -85,6 +85,8 @@ var minDonoValue float64 = 5.0
 
 var solWallets = map[int]utils.SolWallet{}
 
+var inviteCodeMap = map[string]utils.InviteCode{}
+
 var PublicRegistrationsEnabled = false
 
 var ServerMinMediaDono = 5
@@ -165,6 +167,17 @@ func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request) bool {
 	} else {
 		return false
 	}
+}
+
+func generateMoreInviteCodes(codeAmount int) {
+	newCodes := utils.GenerateUniqueCodes(codeAmount)
+	for _, code := range newCodes {
+		err := createNewInviteCode(code.Value, code.Active)
+		if err != nil {
+			log.Println("createNewInviteCode() error:", err)
+		}
+	}
+	inviteCodeMap = utils.AddInviteCodes(inviteCodeMap, newCodes)
 }
 
 // Handler function for the "/donations" endpoint
@@ -282,7 +295,7 @@ func main() {
 	a.Refresh = 10
 	pb.Refresh = 1
 	obsData = getObsData(db, 1)
-
+	inviteCodeMap = getAllCodes()
 	setServerVars()
 
 	//go createTestDono(2, "Big Bob", "XMR", "This Cruel Message is Bob's Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! ", "50", 100, "https://www.youtube.com/watch?v=6iseNlvH2_s")
@@ -468,6 +481,7 @@ func setupRoutes() {
 		{"/usermanager", allUsersHandler},
 		{"/refresh", refreshHandler},
 		{"/toggleUserRegistrations", toggleUserRegistrationsHandler},
+		{"/generatecodes", generateCodesHandler},
 		{"/cryptosettings", cryptoSettingsHandler},
 	}
 
@@ -651,10 +665,12 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 			Title            string
 			RegistrationOpen bool
 			Users            map[int]utils.User
+			InviteCodes      map[string]utils.InviteCode
 		}{
 			Title:            "Users Dashboard",
 			RegistrationOpen: PublicRegistrationsEnabled,
 			Users:            globalUsers,
+			InviteCodes:      inviteCodeMap,
 		}
 
 		// Parse the HTML template and execute it with the data
@@ -672,6 +688,18 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+}
+
+func generateCodesHandler(w http.ResponseWriter, r *http.Request) {
+	if checkLoggedInAdmin(w, r) {
+		generateMoreInviteCodes(5)
+		http.Redirect(w, r, "/usermanager", http.StatusSeeOther)
+		allUsersHandler(w, r)
+	} else {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
 }
 
 func toggleUserRegistrationsHandler(w http.ResponseWriter, r *http.Request) {
@@ -706,6 +734,31 @@ func updateEnabledDate(userID int) error {
 	}
 
 	return nil
+}
+
+func getAllCodes() map[string]utils.InviteCode {
+
+	rows, err := db.Query("SELECT * FROM invites")
+	if err != nil {
+		log.Println(err)
+		return inviteCodeMap
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ic utils.InviteCode
+
+		err = rows.Scan(&ic.Value, &ic.Active)
+
+		if err != nil {
+			log.Println(err)
+			return inviteCodeMap
+		}
+		inviteCodeMap[ic.Value] = ic
+	}
+
+	return inviteCodeMap
+
 }
 
 func getAllUsers() ([]utils.User, error) {
@@ -2180,8 +2233,8 @@ func createDatabaseIfNotExists(db *sql.DB) error {
 
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS addresses (
-            key_public TEXT NOT NULL,
-            key_private BLOB NOT NULL
+            value TEXT NOT NULL,
+            active BOOL NOT NULL
         )
     `)
 	if err != nil {
@@ -2252,6 +2305,20 @@ func createDatabaseIfNotExists(db *sql.DB) error {
 	createNewUser("paul", "hunter")
 
 	return nil
+}
+
+func createNewInviteCode(value string, active bool) error {
+	inviteData := `
+        INSERT INTO invites (
+            value,
+            active
+        ) VALUES (?, ?);`
+	_, err := db.Exec(inviteData, value, active)
+	if err != nil {
+		return err
+	} else {
+		return nil
+	}
 }
 
 func createNewOBS(db *sql.DB, userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string) {
@@ -2485,6 +2552,22 @@ func createUser(user utils.User) int {
 	}
 
 	return userID
+}
+
+// update an existing code
+func updateInviteCode(code utils.InviteCode) error {
+
+	inviteCodeMap[code.Value] = code
+	statement := `
+		UPDATE invites
+		SET value=?, active=?
+		WHERE value=?
+	`
+	_, err := db.Exec(statement, code.Value, code.Active, code.Value)
+	if err != nil {
+		log.Fatalf("failed, err: %v", err)
+	}
+	return err
 }
 
 // update an existing user
@@ -3857,8 +3940,21 @@ func returnIPPenalty(ips []string, currentDonoIP string) float64 {
 	return expoAdder
 }
 
+func checkValidInviteCode(ic string) bool {
+	if _, ok := inviteCodeMap[ic]; ok {
+		if inviteCodeMap[ic].Active {
+			return true
+		} else {
+			return false
+		}
+	} else {
+		return false
+	}
+}
+
 func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 	username := r.FormValue("username")
+	invitecode := r.FormValue("invitecode")
 
 	username = utils.SanitizeStringLetters(username)
 
@@ -3871,15 +3967,21 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isAdmin {
-		err_ := createNewUser(username, password)
-		if err_ != nil {
-			log.Println(err_)
+	if !PublicRegistrationsEnabled {
+		if isAdmin || checkValidInviteCode(invitecode) {
+			if !checkUsernamePendingOrCreated(username) {
+				err_ := createNewUser(username, password)
+				if err_ != nil {
+					log.Println(err_)
+				} else {
+					inviteCodeMap[invitecode] = utils.InviteCode{Value: invitecode, Active: false}
+					updateInviteCode(inviteCodeMap[invitecode])
+				}
+				http.Redirect(w, r, "/user", http.StatusSeeOther)
+				return
+			}
 		}
-
-		http.Redirect(w, r, "/user", http.StatusSeeOther)
-		return
-	} else if PublicRegistrationsEnabled {
+	} else {
 		if !checkUsernamePendingOrCreated(username) {
 			pendingUser, err := createNewPendingUser(username, password)
 			if err != nil {
@@ -3918,9 +4020,6 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-	} else {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
 	}
 }
 
