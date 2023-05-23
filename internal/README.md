@@ -9,5 +9,6 @@ for now, there is...
 - sol.go
 - xmr.go
 - utils.go
+- invite.go
 
 The interfaces on each file will show the methods associated with each repository.
