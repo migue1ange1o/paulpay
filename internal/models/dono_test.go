@@ -14,6 +14,8 @@ func TestDonoRepository_CheckUnfulfilled(t *testing.T) {
 	// Create a new instance of DonoRepository
 	// Open a new database connection
 	var err error
+	var db *sql.DB
+
 	db, err = sql.Open("sqlite3", "users.db")
 	if err != nil {
 		log.Fatal(err)

@@ -26,6 +26,9 @@ type BillingData struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
+type BillingRepositoryInterface interface {
+	getAllBilling() ([]BillingData, error)
+}
 
 type BillingRepository struct {
 	db       *sql.DB

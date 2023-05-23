@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"shadowchat/utils"
+	"strconv"
 
 	//	"github.com/davecgh/go-spew/spew"
 
@@ -16,15 +17,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var globalUsers = map[int]utils.User{}
-var pendingGlobalUsers = map[int]utils.PendingUser{}
-
-var db *sql.DB
-var userSessions = make(map[string]int)
 var amountNeeded = 1000.00
 var amountSent = 200.00
-var donosMap = make(map[int]utils.Dono) // initialize an empty map
 var minDonoValue float64 = 5.0
+
+const username = "admin"
 
 type User struct {
 	UserID               int
@@ -63,6 +60,17 @@ type User struct {
 	DefaultCrypto        string
 }
 
+type PendingUser struct {
+	ID             int
+	Username       string
+	HashedPassword []byte
+	XMRPayID       string
+	ETHNeeded      string
+	XMRNeeded      string
+	ETHAddress     string
+	XMRAddress     string
+}
+
 type CryptosEnabled struct {
 	XMR   bool
 	SOL   bool
@@ -86,19 +94,47 @@ type OBSDataStruct struct {
 	Sent        float64
 }
 
+type UserRepositoryInterface interface {
+	GetByID(userID int) (User, error)
+	CreateAdmin()
+	GetNew(username string, hashedPassword []byte) User
+	createNew(username, password string) error
+	create(user User) int
+	getAll() ([]User, error)
+	update(user User) error
+	updateObsData(userID int, gifName string, mp3Name string, ttsVoice string, pbData ProgressbarData) error
+	createNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string)
+	insertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error
+	getOBSDataByUserID(userID int) (utils.OBSDataStruct, error)
+	printUserColumns() error
+	setUserMinDonos(user User) User
+	setMinDonos()
+	getAdminETHAdd() string
+	getUserBySessionCached(sessionToken string) (User, bool)
+	getUserByUsernameCached(username string) (User, bool)
+	getUserByUsername(username string) (User, error)
+	createNewUserFromPending(user_ PendingUser) error
+	deletePendingUser(user PendingUser) error
+	renewUserSubscription(user User)
+}
+
 type UserRepository struct {
-	db          *sql.DB
-	solRepo     *SolRepository
-	billingRepo *BillingRepository
-	users       map[int]User
+	db           *sql.DB
+	solRepo      *SolRepository
+	billingRepo  *BillingRepository
+	users        map[int]User
+	pendingUsers map[int]PendingUser
+	userSessions map[string]int
 }
 
 func NewUserRepository(db *sql.DB, sr *SolRepository, br *BillingRepository) *UserRepository {
 	return &UserRepository{
-		db:          db,
-		solRepo:     sr,
-		billingRepo: br,
-		users:       make(map[int]User),
+		db:           db,
+		solRepo:      sr,
+		billingRepo:  br,
+		users:        make(map[int]User),
+		pendingUsers: make(map[int]PendingUser),
+		userSessions: make(map[string]int),
 	}
 }
 
@@ -500,4 +536,174 @@ func (ur *UserRepository) printUserColumns() error {
 		fmt.Println(column)
 	}
 	return rows.Err()
+}
+
+func (ur *UserRepository) setUserMinDonos(user User) User {
+	var err error
+	user.MinSol, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Solana)), 64)
+	user.MinEth, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Ethereum)), 64)
+	user.MinXmr, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Monero)), 64)
+	user.MinPaint, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Paint)), 64)
+	user.MinHex, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Hexcoin)), 64)
+	user.MinMatic, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Polygon)), 64)
+	user.MinBusd, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.BinanceUSD)), 64)
+	user.MinShib, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.ShibaInu)), 64)
+	user.MinUsdc, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono))), 64)
+	user.MinTusd, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono))), 64)
+	user.MinWbtc, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.WBTC)), 64)
+	user.MinPnk, err = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Kleros)), 64)
+	if err != nil {
+		log.Println("setUserMinDonos() err:", err)
+	}
+
+	return user
+}
+
+func (ur *UserRepository) setMinDonos() {
+	for i := range ur.users {
+		ur.users[i] = ur.setUserMinDonos(ur.users[i])
+	}
+}
+
+func (ur *UserRepository) getAdminETHAdd() string {
+	user, validUser := ur.getUserByUsernameCached(username)
+
+	if !validUser {
+		return ""
+	}
+
+	return user.EthAddress
+}
+
+// get a user by their session token
+func (ur *UserRepository) getUserBySessionCached(sessionToken string) (User, bool) {
+	userID, ok := ur.userSessions[sessionToken]
+	if !ok {
+		log.Println("session token not found")
+		return ur.users[0], false
+	}
+	for _, user := range ur.users {
+		if user.UserID == userID {
+			return user, true
+		}
+	}
+	return ur.users[0], false
+}
+
+func (ur *UserRepository) getUserByUsernameCached(username string) (User, bool) {
+	for _, user := range ur.users {
+		if user.Username == username {
+			return user, true
+		}
+	}
+	return ur.users[0], false
+
+}
+
+// get a user by their username
+func (ur *UserRepository) getUserByUsername(username string) (User, error) {
+	var user User
+	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.db.QueryRow("SELECT * FROM users WHERE Username=?", username)
+	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+	if err != nil {
+		return User{}, err
+	}
+	user.Links = links.String
+	if !links.Valid {
+		user.Links = ""
+	}
+	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoGIF.Valid {           // check if the "dono_gif" column is null
+		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
+	}
+	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoSound.Valid {             // check if the "dono_gif" column is null
+		user.DonoSound = "default.mp3" // set the user's "DonoSound"
+	}
+
+	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+		user.DefaultCrypto = "" // set the user's "DonoSound"
+	}
+
+	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !alertURL.Valid {            // check if the "dono_gif" column is null
+		user.AlertURL = utils.GenerateUniqueURL() // set the user's "DonoSound"
+	}
+
+	ce := CryptosEnabled{
+		XMR:   true,
+		SOL:   true,
+		ETH:   false,
+		PAINT: false,
+		HEX:   true,
+		MATIC: false,
+		BUSD:  true,
+		SHIB:  false,
+		PNK:   true,
+	}
+
+	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+		user.CryptosEnabled = ce // set the user's "DonoSound"
+	}
+
+	user = ur.setUserMinDonos(user)
+
+	return user, nil
+
+}
+
+func (ur *UserRepository) createNewUserFromPending(user_ PendingUser) error {
+	log.Println("running createNewUserFromPending")
+
+	user := ur.getNew(user_.Username, user_.HashedPassword)
+	userID := ur.create(user)
+	if userID != 0 {
+		ur.createNewOBS(userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
+		log.Println("createNewUserFromPending() succeeded, so OBS row was created. Deleting pending user from pendingusers table")
+		err := ur.deletePendingUser(user_)
+		if err != nil {
+			return err
+		}
+	} else {
+		log.Println("createNewUserFromPending() didn't succeed, so OBS row wasn't created. Pending user remains in DB")
+	}
+
+	log.Println("finished createNewUserFromPending()")
+
+	return nil
+}
+
+func (ur *UserRepository) deletePendingUser(user PendingUser) error {
+	delete(ur.pendingUsers, user.ID)
+	_, err := ur.db.Exec(`DELETE FROM pendingusers WHERE id = ?`, user.ID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ur *UserRepository) renewUserSubscription(user User) {
+	user.BillingData.Enabled = true
+	user.BillingData.AmountThisMonth = 0.00
+	user.BillingData.AmountNeeded = 0.00
+	user.BillingData.NeedToPay = false
+	user.BillingData.UpdatedAt = time.Now().UTC()
+	ur.update(user)
+}
+
+func (ur *UserRepository) GetObsData(userId int) OBSDataStruct {
+	var tempObsData OBSDataStruct
+	err := ur.db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id = ?", userId).
+		Scan(&tempObsData.FilenameGIF, &tempObsData.FilenameMP3, &tempObsData.Message, &tempObsData.Needed, &tempObsData.Sent)
+	if err != nil {
+		log.Println("Error:", err)
+	}
+
+	return tempObsData
 }

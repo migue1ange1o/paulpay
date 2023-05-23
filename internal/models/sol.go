@@ -90,6 +90,22 @@ type SolWallet struct {
 	Amount  float64 `json:"amount"`
 }
 
+type SolRepositoryInterface interface {
+	StartMonitoringSolana()
+	CheckTransactionSolana(amt string, addr string, max_depth int) bool
+	SetSolWallets(sW map[int]SolWallet)
+	getTransactionsForAddresses()
+	getTransactionsForAddressesFirst()
+	addSolanaTransactionStart(addr, sig string)
+	addSolanaTransaction(addr, sig string, amount int64)
+	CreatePendingSolDono(name string, message string, mediaURL string, amountNeeded float64) SuperChat
+	containsTransaction(sig string) bool
+	checkSameBalanceSol(wallet SolWallet) (SolWallet, bool)
+	getSOLBalance(address string) (float64, error)
+	getTransactionAmount(sig, addr string) (int64, bool)
+	printSolTx(fromAddr, checkAddr, toAddr string, amountSent int64, sig string)
+}
+
 type SolRepository struct {
 	db      *sql.DB
 	wallets map[int]SolWallet

@@ -33,7 +33,8 @@ import (
 
 	"github.com/gabstv/go-monero/walletrpc"
 	"github.com/google/uuid"
-	"github.com/skip2/go-qrcode"
+	_ "github.com/mattn/go-sqlite3"
+	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/bcrypt"
 	//"github.com/realclientip/realclientip-go"
 )

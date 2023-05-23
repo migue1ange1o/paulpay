@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"math"
 	"net/http"
 	"os"
 	"os/exec"
+	"shadowchat/utils"
 	"strconv"
+	"strings"
 
 	//	"github.com/davecgh/go-spew/spew"
 
@@ -22,6 +25,13 @@ type MoneroPrice struct {
 	Monero struct {
 		Usd float64 `json:"usd"`
 	} `json:"monero"`
+}
+
+type MoneroRepositoryInterface interface {
+	getBalance(checkID string, userID int) (float64, error)
+	startMoneroWallet(portInt, userID int, user User)
+	getPortID(xmrWallets [][]int, userID int) int
+	CheckMoneroPort(userID int) bool
 }
 
 type MoneroRepository struct {
@@ -41,7 +51,7 @@ func NewMoneroRepository(db *sql.DB, ur *UserRepository) *MoneroRepository {
 }
 
 func (mr *MoneroRepository) getBalance(checkID string, userID int) (float64, error) {
-	portID := getPortID(mr.xmrWallets, userID)
+	portID := mr.getPortID(mr.xmrWallets, userID)
 
 	found := true
 	if portID == -100 {
@@ -121,7 +131,7 @@ func (mr *MoneroRepository) getBalance(checkID string, userID int) (float64, err
 }
 
 func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
-	portID := getPortID(mr.xmrWallets, userID)
+	portID := mr.getPortID(mr.xmrWallets, userID)
 	found := true
 
 	if portID == -100 {
@@ -159,11 +169,97 @@ func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
 	user.WalletPending = true
 	mr.userRepo.update(user)
 }
-func getPortID(xmrWallets [][]int, userID int) int {
+func (mr *MoneroRepository) getPortID(xmrWallets [][]int, userID int) int {
 	for _, innerList := range xmrWallets {
 		if innerList[0] == userID {
 			return innerList[1]
 		}
 	}
 	return -100
+}
+
+func (mr *MoneroRepository) CheckMoneroPort(userID int) bool {
+	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
+	portID := mr.getPortID(mr.xmrWallets, userID)
+
+	found := true
+	if portID == -100 {
+		return false
+	}
+
+	if found {
+		fmt.Println("Port ID for user", userID, "is", portID)
+	} else {
+		fmt.Println("Port ID not found for user", userID)
+	}
+
+	rpcURL_ := "http://127.0.0.1:" + strconv.Itoa(portID) + "/json_rpc"
+
+	req, err := http.NewRequest("POST", rpcURL_, payload)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+
+	resp := &utils.RPCResponse{}
+	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
+		return false
+	}
+
+	return true
+}
+
+func (mr *MoneroRepository) getNewAccountXMR() (string, string) {
+	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
+	userID := 1
+	portID := mr.getPortID(mr.xmrWallets, userID)
+
+	found := true
+	if portID == -100 {
+		found = false
+	}
+
+	if found {
+		fmt.Println("Port ID for user", userID, "is", portID)
+	} else {
+		fmt.Println("Port ID not found for user", userID)
+	}
+
+	rpcURL_ := "http://127.0.0.1:" + strconv.Itoa(portID) + "/json_rpc"
+
+	req, err := http.NewRequest("POST", rpcURL_, payload)
+	if err != nil {
+		log.Println("ERROR CREATING req:", err)
+		return "", ""
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println("ERROR SENDING REQUEST:", err)
+		return "", ""
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		log.Println("ERROR: Non-200 response code received:", res.StatusCode)
+		return "", ""
+	}
+
+	resp := &utils.RPCResponse{}
+	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
+		log.Println("ERROR DECODING RESPONSE:", err)
+		return "", ""
+	}
+
+	PayID := html.EscapeString(resp.Result.PaymentID)
+
+	PayAddress := html.EscapeString(resp.Result.IntegratedAddress)
+
+	log.Println("RETURNING XMR PAYID:", PayID)
+	return PayID, PayAddress
 }

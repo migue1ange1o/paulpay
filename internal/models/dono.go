@@ -146,6 +146,18 @@ type ProgressbarData struct {
 	Refresh int
 }
 
+type AlertPageData struct {
+	Name          string
+	Message       string
+	Amount        float64
+	Currency      string
+	MediaURL      string
+	USDAmount     float64
+	Refresh       int
+	DisplayToggle string
+	Userpath      string
+}
+
 type Donation struct {
 	ID              string `json:"donoID"`
 	DonationName    string `json:"donationName"`
@@ -174,6 +186,32 @@ type Dono struct {
 	MediaURL     string
 }
 
+type DonoRepositoryInterface interface {
+	Check() error
+	Create(dono *Dono) int64
+	UpdateInMap(updatedDono Dono)
+	UpdateDonosInDB()
+	IsDonoFulfilled(donoID int) bool
+	CheckUnfulfilled() ([]Dono, error)
+	GetUnfulfilledDonoIPs() ([]string, error)
+	RemoveFulfilled()
+	UpdatePendingDonos() error
+	AddToDonosMap(dono Dono)
+	CreateNewQueueEntry(db *sql.DB, user_id int, address string, name string, message string, amount string, currency string, dono_usd float64, media_url string) error
+	PrintInfo(dono Dono, secondsElapsed, secondsNeededToCheck float64)
+	AddDonoToDonoBar(as, c string, userID int)
+	ReplayDono(donation Donation, userID int)
+	GetEthAddresses() []string
+	CheckObsData() (bool, error)
+	GetEth(eth_address string) ([]Transfer, bool, error)
+	CheckNewETHTransactions(eth_address string) bool
+	CheckNewERCTransactions(eth_address string) bool
+	GetEthTransactions(eth_address string) ([]Transfer, error)
+	GetTransactionAmount(t Transfer) string
+	GetTransactionToken(t Transfer) string
+	GetTokenName(contractAddr string) string
+}
+
 type DonoRepository struct {
 	db                *sql.DB
 	userRepo          *UserRepository
@@ -181,6 +219,7 @@ type DonoRepository struct {
 	pb                ProgressbarData
 	donos             map[int]Dono
 	transfers         []Transfer
+	transactionMap    map[string]Transfer
 	ethAddresses      map[string][]Transfer
 	addressMap        map[string]bool
 	addresses         []string
@@ -196,6 +235,7 @@ func NewDonoRepository(db *sql.DB, ur *UserRepository, mr *MoneroRepository) *Do
 		pb:                ProgressbarData{},
 		donos:             make(map[int]Dono),
 		transfers:         []Transfer{},
+		transactionMap:    make(map[string]Transfer),
 		ethAddresses:      map[string][]Transfer{},
 		addressMap:        make(map[string]bool),
 		addresses:         []string{},
@@ -205,17 +245,27 @@ func NewDonoRepository(db *sql.DB, ur *UserRepository, mr *MoneroRepository) *Do
 }
 
 // old: checkDonos
-func (dr *DonoRepository) check() error {
+func (dr *DonoRepository) Check() error {
 	for {
+		log.Println("Checking pending wallets for successful starting")
+		for _, u_ := range dr.userRepo.users {
+			if u_.WalletUploaded && u_.WalletPending {
+				u_.WalletPending = dr.moneroRepo.CheckMoneroPort(u_.UserID)
+				if !u_.WalletPending {
+					dr.userRepo.update(u_)
+				}
+			}
+		}
+
 		log.Println("Checking donos via checkDonos()")
-		fulfilledDonos, _ := dr.checkUnfulfilled()
+		fulfilledDonos, _ := dr.CheckUnfulfilled()
 		if len(fulfilledDonos) > 0 {
 			fmt.Println("Fulfilled Donos:")
 		}
 
 		for _, dono := range fulfilledDonos {
 			fmt.Println(dono)
-			user, _ := dr.userRepo.getByID(dono.UserID)
+			user := dr.userRepo.users[dono.UserID]
 			if user.BillingData.AmountTotal >= 500 {
 				user.BillingData.AmountThisMonth += dono.USDAmount
 			} else if user.BillingData.AmountTotal+dono.USDAmount >= 500 {
@@ -224,7 +274,7 @@ func (dr *DonoRepository) check() error {
 			user.BillingData.AmountTotal += dono.USDAmount
 			dr.userRepo.update(user)
 
-			err := dr.createNewQueueEntry(dr.db, dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountSent, dono.CurrencyType, dono.USDAmount, dono.MediaURL)
+			err := dr.CreateNewQueueEntry(dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountSent, dono.CurrencyType, dono.USDAmount, dono.MediaURL)
 			if err != nil {
 				panic(err)
 			}
@@ -235,11 +285,11 @@ func (dr *DonoRepository) check() error {
 }
 
 // old: createNewDono
-func (dr *DonoRepository) create(dono *Dono) int64 {
+func (dr *DonoRepository) Create(dono *Dono) int64 {
 	// Get current time
 	createdAt := time.Now().UTC()
 
-	valid, media_url_ := utils.CheckDonoForMediaUSDThreshold(dono.MediaURL, dono.USDAmount, 5)
+	valid, media_url_ := CheckDonoForMediaUSDThreshold(dono.MediaURL, dono.USDAmount)
 
 	if valid == false {
 		media_url_ = ""
@@ -248,7 +298,7 @@ func (dr *DonoRepository) create(dono *Dono) int64 {
 	amount_to_send, _ := utils.StandardizeString(dono.AmountToSend)
 
 	// Execute the SQL INSERT statement
-	result, err := db.Exec(`
+	result, err := dr.db.Exec(`
         INSERT INTO donos (
             user_id,
             dono_address,
@@ -296,7 +346,7 @@ func (dr *DonoRepository) create(dono *Dono) int64 {
 	return id
 }
 
-func (dr *DonoRepository) updateInMap(updatedDono Dono) {
+func (dr *DonoRepository) UpdateInMap(updatedDono Dono) {
 	if _, ok := dr.donos[updatedDono.ID]; ok {
 		// The dono exists in the map, update it
 		dr.donos[updatedDono.ID] = updatedDono
@@ -306,20 +356,20 @@ func (dr *DonoRepository) updateInMap(updatedDono Dono) {
 	}
 }
 
-func (dr *DonoRepository) updateDonosInDB() {
+func (dr *DonoRepository) UpdateDonosInDB() {
 	// Loop through the donosMap and update the database with any changes
-	for _, dono := range donosMap {
+	for _, dono := range dr.donos {
 		if dono.Fulfilled && dono.AmountSent != "0.0" {
 			log.Println("DONO COMPLETED! Dono: ", dono.AmountSent, dono.CurrencyType)
 		}
-		_, err := db.Exec("UPDATE donos SET user_id=?, dono_address=?, dono_name=?, dono_message=?, amount_to_send=?, amount_sent=?, currency_type=?, anon_dono=?, fulfilled=?, encrypted_ip=?, created_at=?, updated_at=?, usd_amount=?, media_url=? WHERE dono_id=?", dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountToSend, dono.AmountSent, dono.CurrencyType, dono.AnonDono, dono.Fulfilled, dono.EncryptedIP, dono.CreatedAt, dono.UpdatedAt, dono.USDAmount, dono.MediaURL, dono.ID)
+		_, err := dr.db.Exec("UPDATE donos SET user_id=?, dono_address=?, dono_name=?, dono_message=?, amount_to_send=?, amount_sent=?, currency_type=?, anon_dono=?, fulfilled=?, encrypted_ip=?, created_at=?, updated_at=?, usd_amount=?, media_url=? WHERE dono_id=?", dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountToSend, dono.AmountSent, dono.CurrencyType, dono.AnonDono, dono.Fulfilled, dono.EncryptedIP, dono.CreatedAt, dono.UpdatedAt, dono.USDAmount, dono.MediaURL, dono.ID)
 		if err != nil {
 			log.Printf("Error updating Dono with ID %d in the database: %v\n", dono.ID, err)
 		}
 	}
 }
 
-func (dr *DonoRepository) isDonoFulfilled(donoID int) bool {
+func (dr *DonoRepository) IsDonoFulfilled(donoID int) bool {
 	// Retrieve the dono with the given ID
 	row := dr.db.QueryRow("SELECT fulfilled FROM donos WHERE dono_id = ?", donoID)
 
@@ -333,18 +383,18 @@ func (dr *DonoRepository) isDonoFulfilled(donoID int) bool {
 }
 
 // old: checkUnfulfilledDonos
-func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
-	ips, err := dr.getUnfulfilledDonoIPs() // get ips
+func (dr *DonoRepository) CheckUnfulfilled() ([]Dono, error) {
+	ips, err := dr.GetUnfulfilledDonoIPs() // get ips
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unfulfilled dono IPs: %w", err)
 	}
 
-	dr.updatePendingDonos()
+	dr.UpdatePendingDonos()
 
 	var fulfilledDonos []Dono
 
-	eth_addresses := dr.getEthAddresses()
+	eth_addresses := dr.GetEthAddresses()
 	for _, eth_address := range eth_addresses {
 		log.Println("Getting ETH txs for:", eth_address)
 	}
@@ -352,7 +402,7 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 	tempMap := make(map[string]bool)
 	for _, eth_address := range eth_addresses {
 		log.Println("Getting ETH txs for:", eth_address)
-		transactions, newTX, _ := dr.getEth(eth_address)
+		transactions, newTX, _ := dr.GetEth(eth_address)
 		if newTX {
 			for _, tx := range transactions {
 				log.Println("new tx", tx)
@@ -378,7 +428,7 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 				} else {
 					log.Println("Dono too old, killed (marked as fulfilled) and won't be checked again.")
 				}
-				dr.updateInMap(dono)
+				dr.UpdateInMap(dono)
 				continue
 			}
 		}
@@ -396,11 +446,11 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 					if valueStr == valueToCheck {
 						log.Println("Matching TX!")
 						dono.AmountSent = valueStr
-						dr.addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
+						dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
 						dono.Fulfilled = true
 						dono.UpdatedAt = time.Now().UTC()
 						fulfilledDonos = append(fulfilledDonos, dono)
-						dr.updateInMap(dono)
+						dr.UpdateInMap(dono)
 						break
 					}
 				}
@@ -409,7 +459,7 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 			valueToCheck, _ := utils.ConvertStringTo18DecimalPlaces(dono.AmountToSend)
 			dono.UpdatedAt = time.Now().UTC()
 			fmt.Println(valueToCheck, dono.CurrencyType, "Dono incomplete.")
-			dr.updateInMap(dono)
+			dr.UpdateInMap(dono)
 			continue
 		}
 
@@ -417,7 +467,7 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 		secondsElapsedSinceLastCheck := time.Since(dono.UpdatedAt).Seconds()
 		dono.UpdatedAt = time.Now().UTC()
 
-		expoAdder := utils.ReturnIPPenalty(ips, dono.EncryptedIP) + time.Since(dono.CreatedAt).Seconds()/60/60/19
+		expoAdder := ReturnIPPenalty(ips, dono.EncryptedIP) + time.Since(dono.CreatedAt).Seconds()/60/60/19
 		secondsNeededToCheck := math.Pow(float64(baseCheckingRate)-0.02, expoAdder)
 
 		if secondsElapsedSinceLastCheck < secondsNeededToCheck {
@@ -432,32 +482,32 @@ func (dr *DonoRepository) checkUnfulfilled() ([]Dono, error) {
 			xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
 			dono.AmountSent = xmrSent
 			xmrNeededStr, _ := utils.StandardizeString(dono.AmountToSend)
-			dr.printInfo(dono, secondsElapsedSinceLastCheck, secondsNeededToCheck)
+			dr.PrintInfo(dono, secondsElapsedSinceLastCheck, secondsNeededToCheck)
 			if dono.AmountSent == xmrNeededStr {
 				dono.AmountSent, _ = utils.PruneStringByDecimalPoints(dono.AmountToSend, 5)
-				dr.addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID)
+				dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID)
 				dono.Fulfilled = true
 				fulfilledDonos = append(fulfilledDonos, dono)
-				dr.updateInMap(dono)
+				dr.UpdateInMap(dono)
 				continue
 			}
 		} else if dono.CurrencyType == "SOL" {
 			if utils.CheckTransactionSolana(dono.AmountToSend, dono.Address, 100) {
 				dono.AmountSent, _ = utils.PruneStringByDecimalPoints(dono.AmountToSend, 5)
-				dr.addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
+				dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
 				dono.Fulfilled = true
 				fulfilledDonos = append(fulfilledDonos, dono)
-				dr.updateInMap(dono)
+				dr.UpdateInMap(dono)
 				continue
 			}
 		}
 	}
-	dr.updateDonosInDB()
-	dr.removeFulfilled()
+	dr.UpdateDonosInDB()
+	dr.RemoveFulfilled()
 	return fulfilledDonos, nil
 }
 
-func (dr *DonoRepository) getUnfulfilledDonoIPs() ([]string, error) {
+func (dr *DonoRepository) GetUnfulfilledDonoIPs() ([]string, error) {
 	ips := []string{}
 
 	rows, err := dr.db.Query(`SELECT encrypted_ip FROM donos WHERE fulfilled = false`)
@@ -482,15 +532,15 @@ func (dr *DonoRepository) getUnfulfilledDonoIPs() ([]string, error) {
 
 	return ips, nil
 }
-func (dr *DonoRepository) removeFulfilled() {
+func (dr *DonoRepository) RemoveFulfilled() {
 	for _, dono := range dr.donos {
-		if _, ok := donosMap[dono.ID]; ok {
-			delete(donosMap, dono.ID)
+		if _, ok := dr.donos[dono.ID]; ok {
+			delete(dr.donos, dono.ID)
 		}
 	}
 }
 
-func (dr *DonoRepository) updatePendingDonos() error {
+func (dr *DonoRepository) UpdatePendingDonos() error {
 
 	// Retrieve all unfulfilled donos from the database
 	rows, err := dr.db.Query(`SELECT * FROM donos WHERE fulfilled = false`)
@@ -534,19 +584,19 @@ func (dr *DonoRepository) updatePendingDonos() error {
 			dono.MediaURL = ""
 		}
 
-		dr.addToDonosMap(dono)
+		dr.AddToDonosMap(dono)
 	}
 	return nil
 }
 
-func (dr *DonoRepository) addToDonosMap(dono Dono) {
+func (dr *DonoRepository) AddToDonosMap(dono Dono) {
 	_, ok := dr.donos[dono.ID]
 	if !ok {
 		dr.donos[dono.ID] = dono
 	}
 }
 
-func (dr *DonoRepository) createNewQueueEntry(db *sql.DB, user_id int, address string, name string, message string, amount string, currency string, dono_usd float64, media_url string) error {
+func (dr *DonoRepository) CreateNewQueueEntry(user_id int, address string, name string, message string, amount string, currency string, dono_usd float64, media_url string) error {
 	f, err := strconv.ParseFloat(amount, 64)
 	if err != nil {
 		panic(err)
@@ -556,7 +606,7 @@ func (dr *DonoRepository) createNewQueueEntry(db *sql.DB, user_id int, address s
 		f = math.Round(f*1e6) / 1e6
 	}
 
-	embedLink := utils.FormatMediaURL(media_url)
+	embedLink := FormatMediaURL(media_url)
 
 	_, err = dr.db.Exec(`
 		INSERT INTO queue (name, message, amount, currency, usd_amount, media_url, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -567,7 +617,7 @@ func (dr *DonoRepository) createNewQueueEntry(db *sql.DB, user_id int, address s
 	return nil
 }
 
-func (dr *DonoRepository) printInfo(dono Dono, secondsElapsed, secondsNeededToCheck float64) {
+func (dr *DonoRepository) PrintInfo(dono Dono, secondsElapsed, secondsNeededToCheck float64) {
 	log.Println("Dono ID:", dono.ID, "Address:", dono.Address, "Name:", dono.Name, "To User:", dono.UserID)
 	log.Println("Message:", dono.Message)
 	fmt.Println(dono.CurrencyType, "Needed:", dono.AmountToSend, "Recieved:", dono.AmountSent)
@@ -575,9 +625,9 @@ func (dr *DonoRepository) printInfo(dono Dono, secondsElapsed, secondsNeededToCh
 	log.Println("Time since check:", fmt.Sprintf("%.2f", secondsElapsed), "Needed:", fmt.Sprintf("%.2f", secondsNeededToCheck))
 
 }
-func (dr *DonoRepository) addDonoToDonoBar(as, c string, userID int) {
+func (dr *DonoRepository) AddDonoToDonoBar(as, c string, userID int) {
 	f, err := strconv.ParseFloat(as, 64)
-	usdVal := getUSDValue(f, c)
+	usdVal := GetUSDValue(f, c)
 	obsData, err := dr.userRepo.getOBSDataByUserID(userID)
 	dr.pb.Sent = obsData.Sent
 	dr.pb.Needed = obsData.Needed
@@ -600,21 +650,21 @@ func (dr *DonoRepository) addDonoToDonoBar(as, c string, userID int) {
 	}
 }
 
-func (dr *DonoRepository) replayDono(donation Donation, userID int) {
-	valid, media_url_ := utils.CheckDonoForMediaUSDThreshold(donation.DonationMedia, utils.ConvertToFloat64(donation.USDValue), 5)
+func (dr *DonoRepository) ReplayDono(donation Donation, userID int) {
+	valid, media_url_ := CheckDonoForMediaUSDThreshold(donation.DonationMedia, ConvertToFloat64(donation.USDValue))
 
 	if valid == false {
 		media_url_ = ""
 	}
 
-	err := dr.createNewQueueEntry(db, userID, "ReplayAddress", donation.DonationName, donation.DonationMessage, donation.AmountSent, donation.Crypto, utils.ConvertToFloat64(donation.USDValue), media_url_)
+	err := dr.CreateNewQueueEntry(userID, "ReplayAddress", donation.DonationName, donation.DonationMessage, donation.AmountSent, donation.Crypto, ConvertToFloat64(donation.USDValue), media_url_)
 	if err != nil {
 		panic(err)
 	}
 }
 
 // old: returnETHAddresses
-func (dr *DonoRepository) getEthAddresses() []string {
+func (dr *DonoRepository) GetEthAddresses() []string {
 	for _, dono := range dr.donos {
 		if dono.CurrencyType != "XMR" && dono.CurrencyType != "SOL" {
 			// Check if the address has already been added, and if not, add it to the slice and map
@@ -628,7 +678,7 @@ func (dr *DonoRepository) getEthAddresses() []string {
 	return dr.addresses
 }
 
-func (dr *DonoRepository) checkObsData() (bool, error) {
+func (dr *DonoRepository) CheckObsData() (bool, error) {
 	var count int
 	err := dr.db.QueryRow("SELECT COUNT(*) FROM obs").Scan(&count)
 	if err != nil {
@@ -637,10 +687,10 @@ func (dr *DonoRepository) checkObsData() (bool, error) {
 	return count == 0, nil
 }
 
-func (dr *DonoRepository) getEth(eth_address string) ([]Transfer, bool, error) {
+func (dr *DonoRepository) GetEth(eth_address string) ([]Transfer, bool, error) {
 	/*check if eth_address is in ethAddresses*/
 	if _, exists := dr.ethAddresses[eth_address]; !exists {
-		transactions, err := dr.getEthTransactions(eth_address)
+		transactions, err := dr.GetEthTransactions(eth_address)
 		if err != nil {
 			log.Println("eth tx error:", err)
 		}
@@ -650,16 +700,16 @@ func (dr *DonoRepository) getEth(eth_address string) ([]Transfer, bool, error) {
 	} else {
 		newTX := false
 		log.Println("eth address does exist, check if transactions are the same")
-		if dr.checkNewETHTransactions(eth_address) {
+		if dr.CheckNewETHTransactions(eth_address) {
 			log.Println("NEW ETH TXS")
-			transactions, _ := dr.getEthTransactions(eth_address)
+			transactions, _ := dr.GetEthTransactions(eth_address)
 			dr.ethAddresses[eth_address] = transactions
 			dr.transfers = append(dr.transfers, transactions...) // Add transactions to dr.transfers
 			newTX = true
 			// Handle ERC transactions if needed
-		} else if dr.checkNewERCTransactions(eth_address) {
+		} else if dr.CheckNewERCTransactions(eth_address) {
 			log.Println("NEW ERC TXS")
-			transactions, _ := dr.getEthTransactions(eth_address)
+			transactions, _ := dr.GetEthTransactions(eth_address)
 			dr.ethAddresses[eth_address] = transactions
 			dr.transfers = append(dr.transfers, transactions...) // Add transactions to dr.transfers
 			newTX = true
@@ -669,7 +719,7 @@ func (dr *DonoRepository) getEth(eth_address string) ([]Transfer, bool, error) {
 	}
 }
 
-func (dr *DonoRepository) checkNewETHTransactions(eth_address string) bool {
+func (dr *DonoRepository) CheckNewETHTransactions(eth_address string) bool {
 	etherscanAPI, err := ioutil.ReadFile("./etherscan_api")
 	if err != nil {
 		log.Println("Error reading Etherscan API Key:", err)
@@ -717,7 +767,7 @@ func (dr *DonoRepository) checkNewETHTransactions(eth_address string) bool {
 	}
 }
 
-func (dr *DonoRepository) checkNewERCTransactions(eth_address string) bool {
+func (dr *DonoRepository) CheckNewERCTransactions(eth_address string) bool {
 	etherscanAPI, err := ioutil.ReadFile("./etherscan_api")
 	if err != nil {
 		log.Println("Error reading Etherscan API Key:", err)
@@ -765,7 +815,7 @@ func (dr *DonoRepository) checkNewERCTransactions(eth_address string) bool {
 	}
 }
 
-func (dr *DonoRepository) getEthTransactions(eth_address string) ([]Transfer, error) {
+func (dr *DonoRepository) GetEthTransactions(eth_address string) ([]Transfer, error) {
 	// Read Alchemy API KEY from file
 	alchemyAPIKEY, err := ioutil.ReadFile("./alchemy_api")
 	if err != nil {
@@ -813,12 +863,12 @@ func (dr *DonoRepository) GetTransactionToken(t Transfer) string {
 	if t.RawContract.Address == "" {
 		asset = "ETH"
 	} else {
-		asset = dr.getTokenName(t.RawContract.Address)
+		asset = dr.GetTokenName(t.RawContract.Address)
 	}
 	return asset
 }
 
-func (dr *DonoRepository) getTokenName(contractAddr string) string {
+func (dr *DonoRepository) GetTokenName(contractAddr string) string {
 	switch contractAddr {
 	case contracts["PAINT"]:
 		return "PAINT"
@@ -837,29 +887,70 @@ func (dr *DonoRepository) getTokenName(contractAddr string) string {
 	}
 }
 
-func getUSDValue(as float64, c string) float64 {
-	usdVal := 0.00
+func (dr *DonoRepository) checkAccountBillings() {
+	for {
+		for _, user := range dr.userRepo.users {
+			if user.BillingData.Enabled {
+				// check if the updated amount is from the current or previous month
+				now := time.Now()
+				updatedMonth := user.BillingData.UpdatedAt.Month()
+				currentMonth := now.Month()
+				if user.BillingData.AmountTotal >= 500 {
 
-	priceMap := map[string]float64{
-		"XMR":   prices.Monero,
-		"SOL":   prices.Solana,
-		"ETH":   prices.Ethereum,
-		"PAINT": prices.Paint,
-		"HEX":   prices.Hexcoin,
-		"MATIC": prices.Polygon,
-		"BUSD":  prices.BinanceUSD,
-		"SHIB":  prices.ShibaInu,
-		"PNK":   prices.Kleros,
+					if updatedMonth == currentMonth {
+						continue
+					} else if now.Day() >= 4 {
+						// the updated amount is from an earlier month, so disable billing
+						user.BillingData.Enabled = false
+						user.BillingData.NeedToPay = true
+						user.BillingData.AmountNeeded = math.Round(user.BillingData.AmountThisMonth*0.03*100) / 100
+
+						xmrNeeded := GetXMRAmountInUSD(user.BillingData.AmountNeeded)
+						ethNeeded := GetETHAmountInUSD(user.BillingData.AmountNeeded)
+
+						PayID, PayAddress := dr.moneroRepo.getNewAccountXMR()
+						user.BillingData.XMRPayID = PayID
+						user.BillingData.XMRAddress = PayAddress
+						user.BillingData.XMRAmount = xmrNeeded
+						user.BillingData.ETHAmount = ethNeeded
+
+						fmt.Printf("Disabling billing for user %d\n", user.UserID)
+					} else {
+						user.BillingData.NeedToPay = true
+						user.BillingData.Enabled = true
+					}
+				} else {
+					dr.userRepo.renewUserSubscription(user)
+				}
+			}
+		}
+		time.Sleep(time.Duration(12) * time.Hour)
+	}
+}
+
+func (dr *DonoRepository) CreateTestDono(user_id int, name string, curr string, message string, amount string, usdAmount float64, media_url string) {
+	valid, media_url_ := dr.CheckDonoForMediaUSDThreshold(media_url, usdAmount)
+
+	if valid == false {
+		media_url_ = ""
 	}
 
-	if price, ok := priceMap[c]; ok {
-		usdVal = as * price
-	} else {
-		usdVal = 1.00
-		return usdVal
+	log.Println("TESTING DONO IN FIVE SECONDS")
+	time.Sleep(5 * time.Second)
+	log.Println("TESTING DONO NOW")
+	err := dr.CreateNewQueueEntry(user_id, "TestAddress", name, message, amount, curr, usdAmount, media_url_)
+	if err != nil {
+		panic(err)
 	}
-	usdValStr := fmt.Sprintf("%.2f", usdVal)      // format usdVal as a string with 2 decimal points
-	usdVal, _ = strconv.ParseFloat(usdValStr, 64) // convert the string back to a float
+	dr.AddDonoToDonoBar(amount, curr, user_id)
+}
 
-	return usdVal
+func (dr *DonoRepository) CheckDonoForMediaUSDThreshold(media_url string, dono_usd float64) (bool, string) {
+	valid := true
+	if dono_usd < float64(ServerMinMediaDono) {
+		media_url = ""
+		valid = false
+
+	}
+	return valid, media_url
 }
