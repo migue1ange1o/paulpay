@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -58,6 +59,11 @@ type User struct {
 	CryptosEnabled       CryptosEnabled
 	BillingData          BillingData
 	DefaultCrypto        string
+}
+
+type Link struct {
+	URL         string `json:"url"`
+	Description string `json:"description"`
 }
 
 type PendingUser struct {
@@ -119,39 +125,39 @@ type UserRepositoryInterface interface {
 }
 
 type UserRepository struct {
-	db           *sql.DB
-	solRepo      *SolRepository
-	billingRepo  *BillingRepository
-	users        map[int]User
-	pendingUsers map[int]PendingUser
-	userSessions map[string]int
+	Db           *sql.DB
+	SolRepo      *SolRepository
+	BillingRepo  *BillingRepository
+	Users        map[int]User
+	PendingUsers map[int]PendingUser
+	UserSessions map[string]int
 }
 
 func NewUserRepository(db *sql.DB, sr *SolRepository, br *BillingRepository) *UserRepository {
 	return &UserRepository{
-		db:           db,
-		solRepo:      sr,
-		billingRepo:  br,
-		users:        make(map[int]User),
-		pendingUsers: make(map[int]PendingUser),
-		userSessions: make(map[string]int),
+		Db:           db,
+		SolRepo:      sr,
+		BillingRepo:  br,
+		Users:        make(map[int]User),
+		PendingUsers: make(map[int]PendingUser),
+		UserSessions: make(map[string]int),
 	}
 }
 
-func (ur *UserRepository) getByID(userID int) (User, error) {
-	user, ok := ur.users[userID]
+func (ur *UserRepository) GetByID(userID int) (User, error) {
+	user, ok := ur.Users[userID]
 	if !ok {
 		return User{}, errors.New("user not found")
 	}
 	return user, nil
 }
 
-func (ur *UserRepository) createAdmin() {
+func (ur *UserRepository) CreateAdmin() {
 
-	ur.createNew("admin", "hunter123")
+	ur.CreateNew("admin", "hunter123")
 }
 
-func (ur *UserRepository) getNew(username string, hashedPassword []byte) User {
+func (ur *UserRepository) GetNew(username string, hashedPassword []byte) User {
 
 	ce := CryptosEnabled{
 		XMR:   false,
@@ -186,7 +192,7 @@ func (ur *UserRepository) getNew(username string, hashedPassword []byte) User {
 	return user
 }
 
-func (ur *UserRepository) createNew(username, password string) error {
+func (ur *UserRepository) CreateNew(username, password string) error {
 	log.Println("running createNewUser")
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -194,10 +200,10 @@ func (ur *UserRepository) createNew(username, password string) error {
 		return err
 	}
 	// create admin user if not exists
-	user := ur.getNew(username, hashedPassword)
-	userID := ur.create(user)
+	user := ur.GetNew(username, hashedPassword)
+	userID := ur.Create(user)
 	if userID != 0 {
-		ur.createNewOBS(userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
+		ur.CreateNewOBS(userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
 		log.Println("createUser() succeeded, so OBS row was created.")
 	} else {
 		log.Println("createUser() didn't succeed, so OBS row wasn't created.")
@@ -207,7 +213,7 @@ func (ur *UserRepository) createNew(username, password string) error {
 	return nil
 }
 
-func (ur *UserRepository) create(user User) int {
+func (ur *UserRepository) Create(user User) int {
 	log.Println("running CreateUser")
 	// Insert the user's data into the database
 
@@ -223,9 +229,9 @@ func (ur *UserRepository) create(user User) int {
 		PNK:   true,
 	}
 
-	ce_ := cryptosStructToJSONString(ce)
+	ce_ := CryptosStructToJSONString(ce)
 
-	_, err := ur.db.Exec(`
+	_, err := ur.Db.Exec(`
         INSERT INTO users (
             username,
             HashedPassword,
@@ -255,7 +261,7 @@ func (ur *UserRepository) create(user User) int {
 	}
 
 	// Get the ID of the newly created user
-	row := ur.db.QueryRow(`SELECT last_insert_rowid()`)
+	row := ur.Db.QueryRow(`SELECT last_insert_rowid()`)
 	var userID int
 	err = row.Scan(&userID)
 	if err != nil {
@@ -276,7 +282,7 @@ func (ur *UserRepository) create(user User) int {
 		UpdatedAt:       time.Now().UTC(),
 	}
 
-	_, err = ur.db.Exec(`
+	_, err = ur.Db.Exec(`
         INSERT INTO billing (
             user_id,
             amount_this_month,
@@ -292,7 +298,7 @@ func (ur *UserRepository) create(user User) int {
     `, billing.UserID, billing.AmountThisMonth, billing.AmountTotal, billing.Enabled, billing.NeedToPay, "", "", "", billing.CreatedAt, billing.CreatedAt)
 
 	user.BillingData = billing
-	ur.users[userID] = user
+	ur.Users[userID] = user
 
 	log.Printf("BillingData.Enabled: %v", billing.Enabled)
 
@@ -325,7 +331,7 @@ func (ur *UserRepository) create(user User) int {
 	minDonoValue = float64(user.MinDono)
 	log.Println("finished createNewUser")
 
-	_, err = ur.getAll()
+	_, err = ur.GetAll()
 	if err != nil {
 		log.Fatalf("createUser() getAllUsers() error: %v", err)
 	}
@@ -333,9 +339,9 @@ func (ur *UserRepository) create(user User) int {
 	return userID
 }
 
-func (ur *UserRepository) getAll() ([]User, error) {
+func (ur *UserRepository) GetAll() ([]User, error) {
 	var users []User
-	rows, err := ur.db.Query("SELECT * FROM users")
+	rows, err := ur.Db.Query("SELECT * FROM users")
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +397,7 @@ func (ur *UserRepository) getAll() ([]User, error) {
 			PNK:   true,
 		}
 
-		user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String)
+		user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String)
 		if !cryptosEnabled.Valid {
 			log.Println("user cryptos enabled not fixed")
 			user.CryptosEnabled = ce
@@ -404,20 +410,20 @@ func (ur *UserRepository) getAll() ([]User, error) {
 		return nil, err
 	}
 
-	billings, err := ur.billingRepo.getAllBilling()
+	billings, err := ur.BillingRepo.getAllBilling()
 	if err != nil {
 		return nil, err
 	}
 
 	for _, billing := range billings {
-		ur.billingRepo.billings[billing.UserID] = billing
+		ur.BillingRepo.billings[billing.UserID] = billing
 	}
 
 	for i := range users {
-		billing, ok := ur.billingRepo.billings[users[i].UserID]
+		billing, ok := ur.BillingRepo.billings[users[i].UserID]
 		if ok {
 			users[i].BillingData = billing
-			ur.users[users[i].UserID] = users[i]
+			ur.Users[users[i].UserID] = users[i]
 		}
 	}
 
@@ -425,17 +431,17 @@ func (ur *UserRepository) getAll() ([]User, error) {
 }
 
 // old: updateUser
-func (ur *UserRepository) update(user User) error {
-	ur.users[user.UserID] = user
+func (ur *UserRepository) Update(user User) error {
+	ur.Users[user.UserID] = user
 	statement := `
 		UPDATE users
 		SET Username=?, HashedPassword=?, eth_address=?, sol_address=?, hex_address=?,
 			xmr_wallet_password=?, min_donation_threshold=?, min_media_threshold=?, media_enabled=?, modified_at=?, links=?, dono_gif=?, dono_sound=?, alert_url=?, date_enabled=?, wallet_uploaded=?, cryptos_enabled=?
 		WHERE id=?
 	`
-	_, err := ur.db.Exec(statement, user.Username, user.HashedPassword, user.EthAddress,
+	_, err := ur.Db.Exec(statement, user.Username, user.HashedPassword, user.EthAddress,
 		user.SolAddress, user.HexcoinAddress, user.XMRWalletPassword, user.MinDono, user.MinMediaDono,
-		user.MediaEnabled, time.Now().UTC(), user.Links, user.DonoGIF, user.DonoSound, user.AlertURL, user.DateEnabled, user.WalletUploaded, cryptosStructToJSONString(user.CryptosEnabled), user.UserID)
+		user.MediaEnabled, time.Now().UTC(), user.Links, user.DonoGIF, user.DonoSound, user.AlertURL, user.DateEnabled, user.WalletUploaded, CryptosStructToJSONString(user.CryptosEnabled), user.UserID)
 	if err != nil {
 		log.Fatalf("failed, err: %v", err)
 	}
@@ -446,23 +452,23 @@ func (ur *UserRepository) update(user User) error {
 			eth_amount=?, xmr_amount=?, xmr_pay_id=?, created_at=?, updated_at=?
 		WHERE billing_id=?
 	`
-	_, err = ur.db.Exec(statement, user.UserID, user.BillingData.AmountThisMonth, user.BillingData.AmountTotal, user.BillingData.Enabled,
+	_, err = ur.Db.Exec(statement, user.UserID, user.BillingData.AmountThisMonth, user.BillingData.AmountTotal, user.BillingData.Enabled,
 		user.BillingData.NeedToPay, user.BillingData.ETHAmount, user.BillingData.XMRAmount, user.BillingData.XMRPayID, user.BillingData.CreatedAt,
 		user.BillingData.UpdatedAt, user.BillingData.UserID)
 	if err != nil {
 		log.Fatalf("failed, err: %v", err)
 	}
 
-	ur.solRepo.wallets[user.UserID] = SolWallet{
+	ur.SolRepo.wallets[user.UserID] = SolWallet{
 		Address: user.SolAddress,
 		Amount:  0.00,
 	}
 
-	ur.solRepo.SetSolWallets(ur.solRepo.wallets)
+	ur.SolRepo.SetSolWallets(ur.SolRepo.wallets)
 	return err
 }
 
-func (ur *UserRepository) updateObsData(userID int, gifName string, mp3Name string, ttsVoice string, pbData ProgressbarData) error {
+func (ur *UserRepository) UpdateObsData(userID int, gifName string, mp3Name string, ttsVoice string, pbData ProgressbarData) error {
 	updateObsData := `
         UPDATE obs
         SET user_id = ?,
@@ -473,25 +479,25 @@ func (ur *UserRepository) updateObsData(userID int, gifName string, mp3Name stri
             needed = ?,
             sent = ?
         WHERE id = ?;`
-	_, err := ur.db.Exec(updateObsData, userID, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent, userID)
+	_, err := ur.Db.Exec(updateObsData, userID, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent, userID)
 	return err
 }
 
-func (ur *UserRepository) createNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string) {
+func (ur *UserRepository) CreateNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string) {
 	pbData := utils.ProgressbarData{
 		Message: message,
 		Needed:  needed,
 		Sent:    sent,
 		Refresh: refresh,
 	}
-	err := ur.insertObsData(userID, gifFile, soundFile, ttsVoice, pbData)
+	err := ur.InsertObsData(userID, gifFile, soundFile, ttsVoice, pbData)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 }
 
-func (ur *UserRepository) insertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error {
+func (ur *UserRepository) InsertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error {
 	obsData := `
         INSERT INTO obs (
             user_id,
@@ -502,14 +508,14 @@ func (ur *UserRepository) insertObsData(userId int, gifName, mp3Name, ttsVoice s
             needed,
             sent
         ) VALUES (?, ?, ?, ?, ?, ?, ?);`
-	_, err := ur.db.Exec(obsData, userId, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent)
+	_, err := ur.Db.Exec(obsData, userId, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent)
 	return err
 }
 
-func (ur *UserRepository) getOBSDataByUserID(userID int) (utils.OBSDataStruct, error) {
+func (ur *UserRepository) GetOBSDataByUserID(userID int) (utils.OBSDataStruct, error) {
 	var obsData utils.OBSDataStruct
 	//var alertURL sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := ur.db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", userID)
+	row := ur.Db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", userID)
 
 	err := row.Scan(&obsData.FilenameGIF, &obsData.FilenameMP3, &obsData.Message, &obsData.Needed, &obsData.Sent)
 	if err != nil {
@@ -520,8 +526,8 @@ func (ur *UserRepository) getOBSDataByUserID(userID int) (utils.OBSDataStruct, e
 	return obsData, nil
 }
 
-func (ur *UserRepository) printUserColumns() error {
-	rows, err := ur.db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'users';`)
+func (ur *UserRepository) PrintUserColumns() error {
+	rows, err := ur.Db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'users';`)
 	if err != nil {
 		return err
 	}
@@ -538,7 +544,7 @@ func (ur *UserRepository) printUserColumns() error {
 	return rows.Err()
 }
 
-func (ur *UserRepository) setUserMinDonos(user User) User {
+func (ur *UserRepository) SetUserMinDonos(user User) User {
 	var err error
 	user.MinSol, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Solana)), 64)
 	user.MinEth, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Ethereum)), 64)
@@ -559,14 +565,14 @@ func (ur *UserRepository) setUserMinDonos(user User) User {
 	return user
 }
 
-func (ur *UserRepository) setMinDonos() {
-	for i := range ur.users {
-		ur.users[i] = ur.setUserMinDonos(ur.users[i])
+func (ur *UserRepository) SetMinDonos() {
+	for i := range ur.Users {
+		ur.Users[i] = ur.SetUserMinDonos(ur.Users[i])
 	}
 }
 
-func (ur *UserRepository) getAdminETHAdd() string {
-	user, validUser := ur.getUserByUsernameCached(username)
+func (ur *UserRepository) GetAdminETHAdd() string {
+	user, validUser := ur.GetUserByUsernameCached(username)
 
 	if !validUser {
 		return ""
@@ -576,35 +582,35 @@ func (ur *UserRepository) getAdminETHAdd() string {
 }
 
 // get a user by their session token
-func (ur *UserRepository) getUserBySessionCached(sessionToken string) (User, bool) {
-	userID, ok := ur.userSessions[sessionToken]
+func (ur *UserRepository) GetUserBySessionCached(sessionToken string) (User, bool) {
+	userID, ok := ur.UserSessions[sessionToken]
 	if !ok {
 		log.Println("session token not found")
-		return ur.users[0], false
+		return ur.Users[0], false
 	}
-	for _, user := range ur.users {
+	for _, user := range ur.Users {
 		if user.UserID == userID {
 			return user, true
 		}
 	}
-	return ur.users[0], false
+	return ur.Users[0], false
 }
 
-func (ur *UserRepository) getUserByUsernameCached(username string) (User, bool) {
-	for _, user := range ur.users {
+func (ur *UserRepository) GetUserByUsernameCached(username string) (User, bool) {
+	for _, user := range ur.Users {
 		if user.Username == username {
 			return user, true
 		}
 	}
-	return ur.users[0], false
+	return ur.Users[0], false
 
 }
 
 // get a user by their username
-func (ur *UserRepository) getUserByUsername(username string) (User, error) {
+func (ur *UserRepository) GetUserByUsername(username string) (User, error) {
 	var user User
 	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := ur.db.QueryRow("SELECT * FROM users WHERE Username=?", username)
+	row := ur.Db.QueryRow("SELECT * FROM users WHERE Username=?", username)
 	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
 		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
 		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
@@ -646,26 +652,26 @@ func (ur *UserRepository) getUserByUsername(username string) (User, error) {
 		PNK:   true,
 	}
 
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
 	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
 		user.CryptosEnabled = ce // set the user's "DonoSound"
 	}
 
-	user = ur.setUserMinDonos(user)
+	user = ur.SetUserMinDonos(user)
 
 	return user, nil
 
 }
 
-func (ur *UserRepository) createNewUserFromPending(user_ PendingUser) error {
+func (ur *UserRepository) CreateNewUserFromPending(user_ PendingUser) error {
 	log.Println("running createNewUserFromPending")
 
-	user := ur.getNew(user_.Username, user_.HashedPassword)
-	userID := ur.create(user)
+	user := ur.GetNew(user_.Username, user_.HashedPassword)
+	userID := ur.Create(user)
 	if userID != 0 {
-		ur.createNewOBS(userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
+		ur.CreateNewOBS(userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
 		log.Println("createNewUserFromPending() succeeded, so OBS row was created. Deleting pending user from pendingusers table")
-		err := ur.deletePendingUser(user_)
+		err := ur.DeletePendingUser(user_)
 		if err != nil {
 			return err
 		}
@@ -678,9 +684,9 @@ func (ur *UserRepository) createNewUserFromPending(user_ PendingUser) error {
 	return nil
 }
 
-func (ur *UserRepository) deletePendingUser(user PendingUser) error {
-	delete(ur.pendingUsers, user.ID)
-	_, err := ur.db.Exec(`DELETE FROM pendingusers WHERE id = ?`, user.ID)
+func (ur *UserRepository) DeletePendingUser(user PendingUser) error {
+	delete(ur.PendingUsers, user.ID)
+	_, err := ur.Db.Exec(`DELETE FROM pendingusers WHERE id = ?`, user.ID)
 	if err != nil {
 		return err
 	}
@@ -688,22 +694,395 @@ func (ur *UserRepository) deletePendingUser(user PendingUser) error {
 	return nil
 }
 
-func (ur *UserRepository) renewUserSubscription(user User) {
+func (ur *UserRepository) RenewUserSubscription(user User) {
 	user.BillingData.Enabled = true
 	user.BillingData.AmountThisMonth = 0.00
 	user.BillingData.AmountNeeded = 0.00
 	user.BillingData.NeedToPay = false
 	user.BillingData.UpdatedAt = time.Now().UTC()
-	ur.update(user)
+	ur.Update(user)
 }
 
 func (ur *UserRepository) GetObsData(userId int) OBSDataStruct {
 	var tempObsData OBSDataStruct
-	err := ur.db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id = ?", userId).
+	err := ur.Db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id = ?", userId).
 		Scan(&tempObsData.FilenameGIF, &tempObsData.FilenameMP3, &tempObsData.Message, &tempObsData.Needed, &tempObsData.Sent)
 	if err != nil {
 		log.Println("Error:", err)
 	}
 
 	return tempObsData
+}
+
+// verify that the entered password matches the stored hashed password for a user
+func (ur *UserRepository) VerifyPassword(user User, password string) bool {
+	err := bcrypt.CompareHashAndPassword(user.HashedPassword, []byte(password))
+	return err == nil
+}
+
+func (ur *UserRepository) GetEthAddressByID(userID int) string {
+	if user, ok := ur.Users[userID]; ok {
+		log.Println("Got userID:", user.UserID, "Returned:", user.EthAddress)
+		return user.EthAddress
+	}
+	log.Println("Got userID:", userID, "No user found")
+	return ""
+}
+
+func (ur *UserRepository) GetSolAddressByID(userID int) string {
+	if user, ok := ur.Users[userID]; ok {
+		log.Println("Got userID:", user.UserID, "Returned:", user.SolAddress)
+		return user.SolAddress
+	}
+	log.Println("Got userID:", userID, "No user found")
+	return ""
+}
+
+func (ur *UserRepository) CreatePending(user PendingUser) error {
+	_, err := ur.Db.Exec(`
+        INSERT INTO pendingusers (username, HashedPassword, XMRPayID, XMRNeeded, ETHNeeded)
+        VALUES (?, ?, ?, ?, ?)
+    `, user.Username, user.HashedPassword, user.XMRPayID, user.XMRNeeded, user.ETHNeeded)
+	if err != nil {
+		return err
+	}
+
+	// Get the ID of the newly inserted user
+	row := ur.Db.QueryRow(`SELECT last_insert_rowid()`)
+	err = row.Scan(&user.ID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ur *UserRepository) GetOBSDataByAlertURL(AlertURL string) (OBSDataStruct, error) {
+	user, err := ur.GetUserByAlertURL(AlertURL)
+	if err != nil {
+		log.Println("Couldn't get user,", err)
+	}
+	var obsData OBSDataStruct
+	//var alertURL sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.Db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", user.UserID)
+
+	err = row.Scan(&obsData.FilenameGIF, &obsData.FilenameMP3, &obsData.Message, &obsData.Needed, &obsData.Sent)
+	if err != nil {
+		log.Println("Couldn't get obsData,", err)
+		return obsData, err
+	}
+
+	return obsData, nil
+
+}
+
+func (ur *UserRepository) GetUserByAlertURL(AlertURL string) (User, error) {
+	var user User
+	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.Db.QueryRow("SELECT * FROM users WHERE alert_url=?", AlertURL)
+	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+	if err != nil {
+		return User{}, err
+	}
+	user.Links = links.String
+	if !links.Valid {
+		user.Links = ""
+	}
+	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoGIF.Valid {           // check if the "dono_gif" column is null
+		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
+	}
+	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoSound.Valid {             // check if the "dono_gif" column is null
+		user.DonoSound = "default.mp3" // set the user's "DonoSound"
+	}
+
+	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+		user.DefaultCrypto = "" // set the user's "DonoSound"
+	}
+
+	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !alertURL.Valid {            // check if the "dono_gif" column is null
+		user.AlertURL = GenerateUniqueURL() // set the user's "DonoSound"
+	}
+
+	ce := CryptosEnabled{
+		XMR:   true,
+		SOL:   true,
+		ETH:   false,
+		PAINT: false,
+		HEX:   true,
+		MATIC: false,
+		BUSD:  true,
+		SHIB:  false,
+		PNK:   true,
+	}
+
+	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+		user.CryptosEnabled = ce // set the user's "DonoSound"
+	}
+
+	return user, nil
+}
+
+// check a user by their ID
+func (ur *UserRepository) CheckUserByID(id int) bool {
+	var user User
+	var links, donoGIF, donoSound, defaultCrypto, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.Db.QueryRow("SELECT * FROM users WHERE id=?", id)
+	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+
+	ce := CryptosEnabled{
+		XMR:   true,
+		SOL:   true,
+		ETH:   false,
+		PAINT: false,
+		HEX:   true,
+		MATIC: false,
+		BUSD:  true,
+		SHIB:  false,
+		PNK:   true,
+	}
+
+	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+		user.CryptosEnabled = ce // set the user's "DonoSound"
+	}
+
+	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+		user.DefaultCrypto = "" // set the user's "DonoSound"
+	}
+
+	if err == sql.ErrNoRows {
+		log.Println("checkUserByID(", id, "): User doesn't exist")
+		return false // user doesn't exist
+	} else if err != nil {
+		log.Println("checkUserByID(", id, ") Error:", err)
+		return false
+	}
+	return true // user exists
+
+}
+
+// check a user by their username and return a bool and the id
+func (ur *UserRepository) CheckUserByUsername(username string) (bool, int) {
+	ur.PrintUserColumns()
+	var user User
+	var links, donoGIF, donoSound, defaultCrypto, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.Db.QueryRow("SELECT * FROM users WHERE Username=?", username)
+	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+
+	ce := CryptosEnabled{
+		XMR:   true,
+		SOL:   true,
+		ETH:   false,
+		PAINT: false,
+		HEX:   true,
+		MATIC: false,
+		BUSD:  true,
+		SHIB:  false,
+		PNK:   true,
+	}
+
+	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+		user.CryptosEnabled = ce // set the user's "DonoSound"
+	}
+
+	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+		user.DefaultCrypto = "" // set the user's "DonoSound"
+	}
+
+	if err == sql.ErrNoRows {
+		log.Println("checkUserByUsername(", username, "): User doesn't exist")
+		return false, 0 // user doesn't exist
+	} else if err != nil {
+		log.Println("checkUserByUsername(", username, ") Error:", err)
+		return false, 0
+	}
+	return true, user.UserID // user exists, return true and the user's ID
+}
+
+// get a user by their session token
+func (ur *UserRepository) GetUserBySession(sessionToken string) (User, error) {
+	userID, ok := ur.UserSessions[sessionToken]
+	if !ok {
+		return User{}, fmt.Errorf("session token not found")
+	}
+	var user User
+	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+	row := ur.Db.QueryRow("SELECT * FROM users WHERE id=?", userID)
+	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+	if err != nil {
+		return User{}, err
+	}
+	user.Links = links.String
+	if !links.Valid {
+		user.Links = ""
+	}
+	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoGIF.Valid {           // check if the "dono_gif" column is null
+		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
+	}
+	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !donoSound.Valid {             // check if the "dono_gif" column is null
+		user.DonoSound = "default.mp3" // set the user's "DonoSound"
+	}
+	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+		user.DefaultCrypto = "" // set the user's "DonoSound"
+	}
+
+	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
+	if !alertURL.Valid {            // check if the "dono_gif" column is null
+		user.AlertURL = GenerateUniqueURL() // set the user's "DonoSound"
+	}
+
+	ce := CryptosEnabled{
+		XMR:   true,
+		SOL:   true,
+		ETH:   false,
+		PAINT: false,
+		HEX:   true,
+		MATIC: false,
+		BUSD:  true,
+		SHIB:  false,
+		PNK:   true,
+	}
+
+	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+		user.CryptosEnabled = ce // set the user's "DonoSound"
+	}
+
+	return user, nil
+}
+
+// get links for a user
+func (ur *UserRepository) GetUserLinks(user User) ([]Link, error) {
+	if user.Links == "" {
+		// Insert default links for the user
+		defaultLinks := []Link{
+			{URL: "https://powerchat.live/paultown?tab=donation", Description: "Powerchat"},
+			{URL: "https://cozy.tv/paultown", Description: "cozy.tv/paultown"},
+			{URL: "http://twitter.paul.town/", Description: "Twitter"},
+			{URL: "https://t.me/paultownreal", Description: "Telegram"},
+			{URL: "http://notes.paul.town/", Description: "notes.paul.town"},
+		}
+
+		jsonLinks, err := json.Marshal(defaultLinks)
+		if err != nil {
+			return nil, err
+		}
+
+		user.Links = string(jsonLinks)
+		if err := ur.Update(user); err != nil {
+			return nil, err
+		}
+
+		return defaultLinks, nil
+	}
+
+	var links []Link
+	if err := json.Unmarshal([]byte(user.Links), &links); err != nil {
+		return nil, err
+	}
+
+	return links, nil
+}
+
+func (ur *UserRepository) GetUserCryptosEnabled(user User) (User, error) {
+
+	user.CryptosEnabled.XMR = false
+	user.CryptosEnabled.SOL = false
+	user.CryptosEnabled.ETH = false
+	user.CryptosEnabled.PAINT = true
+	user.CryptosEnabled.HEX = false
+	user.CryptosEnabled.MATIC = true
+	user.CryptosEnabled.BUSD = false
+	user.CryptosEnabled.SHIB = true
+	user.CryptosEnabled.PNK = false
+
+	return user, nil
+
+}
+
+func (ur *UserRepository) GetActiveXMRUsers() ([]*User, error) {
+	var users []*User
+
+	// Define the query to select the active XMR users
+	query := `SELECT * FROM users WHERE wallet_uploaded = ?`
+
+	// Execute the query
+	rows, err := ur.Db.Query(query, true)
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		var user User
+		err = rows.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress, &user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono, &user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &user.Links, &user.DonoGIF, &user.DonoSound, &user.AlertURL, &user.WalletUploaded, &user.DateEnabled)
+		if err != nil {
+			return nil, err
+		}
+
+		oneMonthAhead := user.DateEnabled.AddDate(0, 1, 0)
+		if oneMonthAhead.After(time.Now().UTC()) {
+			users = append(users, &user)
+		}
+
+	}
+	return users, nil
+}
+
+func (ur *UserRepository) getActiveETHUsers() ([]*User, error) {
+	var users []*User
+
+	// Define the query to select the active ETH users
+	query := `SELECT * FROM users WHERE eth_address != ''`
+
+	// Execute the query
+	rows, err := ur.Db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		var user User
+		err = rows.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress, &user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono, &user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &user.Links, &user.DonoGIF, &user.DonoSound, &user.AlertURL, &user.WalletUploaded, &user.DateEnabled)
+		if err != nil {
+			return nil, err
+		}
+
+		oneMonthAhead := user.DateEnabled.AddDate(0, 1, 0)
+		if oneMonthAhead.After(time.Now().UTC()) {
+			users = append(users, &user)
+		}
+	}
+	return users, nil
+}
+
+func (ur *UserRepository) UpdateEnabledDate(userID int) error {
+	// Get the current time
+	now := time.Now()
+
+	// Update the user's enabled date in the database
+	_, err := ur.Db.Exec("UPDATE users SET date_enabled=? WHERE id=?", now, userID)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

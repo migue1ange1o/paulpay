@@ -12,6 +12,8 @@ import (
 	"shadowchat/utils"
 	"strconv"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var starting_port int = 28088
@@ -126,13 +128,13 @@ func CreateDatabaseIfNotExists(db *sql.DB, ur *UserRepository) error {
 		return err
 	}
 
-	err = createObsTable(db)
+	err = CreateObsTable(db)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	ur.createAdmin()
-	ur.createNew("paul", "hunter")
+	ur.CreateAdmin()
+	ur.CreateNew("paul", "hunter")
 
 	return nil
 }
@@ -285,7 +287,7 @@ func checkDatabaseColumnExist(db *sql.DB, dbTable string, dbColumn string) bool 
 	return true // column does exist
 }
 
-func cryptosStructToJSONString(s CryptosEnabled) string {
+func CryptosStructToJSONString(s CryptosEnabled) string {
 	bytes, err := json.Marshal(s)
 	if err != nil {
 		log.Println("cryptosStructToJSONString error:", err)
@@ -294,7 +296,7 @@ func cryptosStructToJSONString(s CryptosEnabled) string {
 	return string(bytes)
 }
 
-func cryptosJsonStringToStruct(jsonStr string) CryptosEnabled {
+func CryptosJsonStringToStruct(jsonStr string) CryptosEnabled {
 	var s CryptosEnabled
 	err := json.Unmarshal([]byte(jsonStr), &s)
 	if err != nil {
@@ -304,7 +306,7 @@ func cryptosJsonStringToStruct(jsonStr string) CryptosEnabled {
 	return s
 }
 
-func createObsTable(db *sql.DB) error {
+func CreateObsTable(db *sql.DB) error {
 	obsTable := `
         CREATE TABLE IF NOT EXISTS obs (
             id INTEGER PRIMARY KEY,
@@ -332,8 +334,8 @@ func GenerateUniqueURL() string {
 }
 
 func StartWallets(ur *UserRepository, mr *MoneroRepository, sr *SolRepository) {
-	ur.printUserColumns()
-	users, err := ur.getAll()
+	ur.PrintUserColumns()
+	users, err := ur.GetAll()
 	if err != nil {
 		log.Fatalf("startWallet() error: %v", err)
 	}
@@ -341,7 +343,7 @@ func StartWallets(ur *UserRepository, mr *MoneroRepository, sr *SolRepository) {
 	for _, user := range users {
 		log.Println("Checking user:", user.Username, "User ID:", user.UserID, "User billing data enabled:", user.BillingData.Enabled)
 		if user.BillingData.Enabled {
-			log.Println("User valid", user.UserID, "User eth_address:", ur.users[user.UserID].EthAddress)
+			log.Println("User valid", user.UserID, "User eth_address:", ur.Users[user.UserID].EthAddress)
 			if user.WalletUploaded {
 				log.Println("Monero wallet uploaded")
 				mr.xmrWallets = append(mr.xmrWallets, []int{user.UserID, starting_port})
@@ -390,7 +392,7 @@ func FormatMediaURL(media_url string) string {
 
 	embedLink := ""
 	if isValid {
-		videoID := extractVideoID(properLink)
+		videoID := ExtractVideoID(properLink)
 		embedLink = fmt.Sprintf(videoID)
 	}
 	return embedLink
@@ -423,7 +425,7 @@ func isYouTubeLink(link string) (bool, int, string) {
 }
 
 // extractVideoID extracts the video ID from a YouTube URL
-func extractVideoID(url string) string {
+func ExtractVideoID(url string) string {
 	videoID := ""
 	// Use a regular expression to extract the video ID from the YouTube URL
 	re := regexp.MustCompile(`v=([\w-]+)`)
@@ -460,7 +462,7 @@ func FetchExchangeRates(ur *UserRepository) {
 		if err != nil {
 			log.Println(err)
 		} else {
-			ur.setMinDonos()
+			ur.SetMinDonos()
 		}
 
 		time.Sleep(80 * time.Second)
@@ -502,14 +504,14 @@ func GetCryptoPrices() (CryptoPrice, error) {
 func CheckPendingAccounts(dr *DonoRepository) {
 	for {
 
-		for _, transaction := range dr.transfers {
+		for _, transaction := range dr.Transfers {
 			tN := dr.GetTransactionToken(transaction)
-			if tN == "ETH" && transaction.To == dr.userRepo.getAdminETHAdd() {
+			if tN == "ETH" && transaction.To == dr.UserRepo.GetAdminETHAdd() {
 				valueStr := fmt.Sprintf("%.18f", transaction.Value)
 
-				for _, user := range dr.userRepo.pendingUsers {
+				for _, user := range dr.UserRepo.PendingUsers {
 					if user.ETHNeeded == valueStr {
-						err := dr.userRepo.createNewUserFromPending(user)
+						err := dr.UserRepo.CreateNewUserFromPending(user)
 						if err != nil {
 							log.Println("Error marking payment as complete:", err)
 						} else {
@@ -520,8 +522,8 @@ func CheckPendingAccounts(dr *DonoRepository) {
 			}
 		}
 
-		for _, user := range dr.userRepo.pendingUsers {
-			xmrFl, _ := dr.moneroRepo.getBalance(user.XMRPayID, 1)
+		for _, user := range dr.UserRepo.PendingUsers {
+			xmrFl, _ := dr.MoneroRepo.getBalance(user.XMRPayID, 1)
 			xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
 
 			log.Println("XMR sent:", xmrSent)
@@ -529,7 +531,7 @@ func CheckPendingAccounts(dr *DonoRepository) {
 			log.Println("XMR sent str:", xmrSentStr)
 			log.Println("XMRNeeded str:", user.XMRNeeded)
 			if user.XMRNeeded == xmrSentStr {
-				err := dr.userRepo.createNewUserFromPending(user)
+				err := dr.UserRepo.CreateNewUserFromPending(user)
 				if err != nil {
 					log.Println("Error marking payment as complete:", err)
 				} else {
@@ -547,25 +549,25 @@ func CheckBillingAccounts(dr *DonoRepository) {
 		tMapGenerated := false
 		transactionMap := make(map[string]utils.Transfer)
 
-		for _, user := range dr.userRepo.users {
+		for _, user := range dr.UserRepo.Users {
 
 			if user.BillingData.NeedToPay {
 
-				xmrFl, _ := dr.moneroRepo.getBalance(user.BillingData.XMRPayID, 1)
+				xmrFl, _ := dr.MoneroRepo.getBalance(user.BillingData.XMRPayID, 1)
 				xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
 				xmrSentStr, _ := utils.StandardizeString(xmrSent)
 				if user.BillingData.XMRAmount == xmrSentStr {
-					dr.userRepo.renewUserSubscription(user)
+					dr.UserRepo.RenewUserSubscription(user)
 					continue
 				}
 
-				adminETHAdd := dr.userRepo.getAdminETHAdd()
+				adminETHAdd := dr.UserRepo.GetAdminETHAdd()
 
 				if !tMapGenerated { //Generate Map from transaction slice
-					for _, transaction := range dr.transfers {
+					for _, transaction := range dr.Transfers {
 						hash := dr.GetTransactionAmount(transaction)
 						standard_hash, _ := utils.StandardizeString(hash)
-						dr.transactionMap[standard_hash] = transaction
+						dr.TransactionMap[standard_hash] = transaction
 					}
 					tMapGenerated = true
 				}
@@ -575,7 +577,7 @@ func CheckBillingAccounts(dr *DonoRepository) {
 				if ok {
 					tN := utils.GetTransactionToken(transaction)
 					if tN == "ETH" && transaction.To == adminETHAdd {
-						dr.userRepo.renewUserSubscription(user)
+						dr.UserRepo.RenewUserSubscription(user)
 						continue
 					}
 				}
@@ -617,7 +619,7 @@ func SetServerVars(ur *UserRepository) {
 	log.Println("		 ..")
 	time.Sleep(2 * time.Second)
 	log.Println("------------ setServerVars()")
-	ur.setMinDonos()
+	ur.SetMinDonos()
 }
 
 func GetNewAccountXMRPrice() string {
@@ -644,4 +646,39 @@ func GetNewAccountETHPrice() string {
 	ethStr := utils.FuzzDono(ethPrice, "ETH")
 	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
 	return ethStr_
+}
+
+func CreateNewPendingUser(username string, password string, dr *DonoRepository, ur *UserRepository, mr *MoneroRepository) (PendingUser, error) {
+	log.Println("begin createNewPendingUser()")
+	user_, _ := ur.GetUserByUsernameCached("admin")
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return PendingUser{}, err
+	}
+	PayID, PayAddress := mr.GetNewAccountXMR()
+	user := PendingUser{
+		Username:       username,
+		HashedPassword: hashedPassword,
+		ETHAddress:     user_.EthAddress,
+		XMRAddress:     PayAddress,
+		ETHNeeded:      GetNewAccountETHPrice(),
+		XMRNeeded:      GetNewAccountXMRPrice(),
+		XMRPayID:       PayID,
+	}
+
+	err = ur.CreatePending(user)
+	if err != nil {
+		log.Println("createPendingUser:", err)
+		return PendingUser{}, err
+	}
+	// Get the ID of the newly inserted user
+	row := ur.Db.QueryRow(`SELECT last_insert_rowid()`)
+	err = row.Scan(&user.ID)
+	if err != nil {
+		return PendingUser{}, err
+	}
+	ur.PendingUsers[user.ID] = user
+	log.Println("finish createNewPendingUser() without error")
+	return user, nil
+
 }

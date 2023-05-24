@@ -35,23 +35,23 @@ type MoneroRepositoryInterface interface {
 }
 
 type MoneroRepository struct {
-	db           *sql.DB
-	userRepo     *UserRepository
-	xmrTransfers []MoneroPrice
-	xmrWallets   [][]int
+	Db           *sql.DB
+	UserRepo     *UserRepository
+	XmrTransfers []MoneroPrice
+	XmrWallets   [][]int
 }
 
 func NewMoneroRepository(db *sql.DB, ur *UserRepository) *MoneroRepository {
 	return &MoneroRepository{
-		db:           db,
-		userRepo:     ur,
-		xmrTransfers: []MoneroPrice{},
-		xmrWallets:   [][]int{},
+		Db:           db,
+		UserRepo:     ur,
+		XmrTransfers: []MoneroPrice{},
+		XmrWallets:   [][]int{},
 	}
 }
 
 func (mr *MoneroRepository) getBalance(checkID string, userID int) (float64, error) {
-	portID := mr.getPortID(mr.xmrWallets, userID)
+	portID := mr.GetPortID(mr.XmrWallets, userID)
 
 	found := true
 	if portID == -100 {
@@ -131,7 +131,7 @@ func (mr *MoneroRepository) getBalance(checkID string, userID int) (float64, err
 }
 
 func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
-	portID := mr.getPortID(mr.xmrWallets, userID)
+	portID := mr.GetPortID(mr.XmrWallets, userID)
 	found := true
 
 	if portID == -100 {
@@ -156,7 +156,7 @@ func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
 		log.Println("Error running command:", err)
 		user.WalletUploaded = false
 		user.WalletPending = false
-		mr.userRepo.update(user)
+		mr.UserRepo.Update(user)
 		return
 	}
 
@@ -167,9 +167,9 @@ func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
 	fmt.Println("Done starting monero wallet for", portStr, userID)
 	user.WalletUploaded = true
 	user.WalletPending = true
-	mr.userRepo.update(user)
+	mr.UserRepo.Update(user)
 }
-func (mr *MoneroRepository) getPortID(xmrWallets [][]int, userID int) int {
+func (mr *MoneroRepository) GetPortID(xmrWallets [][]int, userID int) int {
 	for _, innerList := range xmrWallets {
 		if innerList[0] == userID {
 			return innerList[1]
@@ -180,7 +180,7 @@ func (mr *MoneroRepository) getPortID(xmrWallets [][]int, userID int) int {
 
 func (mr *MoneroRepository) CheckMoneroPort(userID int) bool {
 	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
-	portID := mr.getPortID(mr.xmrWallets, userID)
+	portID := mr.GetPortID(mr.XmrWallets, userID)
 
 	found := true
 	if portID == -100 {
@@ -213,10 +213,10 @@ func (mr *MoneroRepository) CheckMoneroPort(userID int) bool {
 	return true
 }
 
-func (mr *MoneroRepository) getNewAccountXMR() (string, string) {
+func (mr *MoneroRepository) GetNewAccountXMR() (string, string) {
 	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
 	userID := 1
-	portID := mr.getPortID(mr.xmrWallets, userID)
+	portID := mr.GetPortID(mr.XmrWallets, userID)
 
 	found := true
 	if portID == -100 {

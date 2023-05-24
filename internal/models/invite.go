@@ -21,22 +21,22 @@ type InviteRepositoryInterface interface {
 }
 
 type InviteRepository struct {
-	db            *sql.DB
-	inviteCodeMap map[string]InviteCode
+	Db            *sql.DB
+	InviteCodeMap map[string]InviteCode
 }
 
 func NewInviteRepository(db *sql.DB) *InviteRepository {
 	return &InviteRepository{
-		db:            db,
-		inviteCodeMap: map[string]InviteCode{},
+		Db:            db,
+		InviteCodeMap: map[string]InviteCode{},
 	}
 }
 
-func (ir *InviteRepository) getAllCodes() map[string]InviteCode {
-	rows, err := ir.db.Query("SELECT * FROM invites")
+func (ir *InviteRepository) GetAllCodes() map[string]InviteCode {
+	rows, err := ir.Db.Query("SELECT * FROM invites")
 	if err != nil {
 		log.Println(err)
-		return ir.inviteCodeMap
+		return ir.InviteCodeMap
 	}
 	defer rows.Close()
 
@@ -47,21 +47,21 @@ func (ir *InviteRepository) getAllCodes() map[string]InviteCode {
 
 		if err != nil {
 			log.Println(err)
-			return ir.inviteCodeMap
+			return ir.InviteCodeMap
 		}
-		ir.inviteCodeMap[ic.Value] = ic
+		ir.InviteCodeMap[ic.Value] = ic
 	}
 
-	return ir.inviteCodeMap
+	return ir.InviteCodeMap
 }
 
-func (ir *InviteRepository) createNewInviteCode(value string, active bool) error {
+func (ir *InviteRepository) CreateNewInviteCode(value string, active bool) error {
 	inviteData := `
         INSERT INTO invites (
             value,
             active
         ) VALUES (?, ?);`
-	_, err := ir.db.Exec(inviteData, value, active)
+	_, err := ir.Db.Exec(inviteData, value, active)
 	if err != nil {
 		return err
 	} else {
@@ -69,34 +69,34 @@ func (ir *InviteRepository) createNewInviteCode(value string, active bool) error
 	}
 }
 
-func (ir *InviteRepository) updateInviteCode(code InviteCode) error {
-	ir.inviteCodeMap[code.Value] = code
+func (ir *InviteRepository) UpdateInviteCode(code InviteCode) error {
+	ir.InviteCodeMap[code.Value] = code
 	statement := `
 		UPDATE invites
 		SET value=?, active=?
 		WHERE value=?
 	`
-	_, err := ir.db.Exec(statement, code.Value, code.Active, code.Value)
+	_, err := ir.Db.Exec(statement, code.Value, code.Active, code.Value)
 	if err != nil {
 		log.Fatalf("failed, err: %v", err)
 	}
 	return err
 }
 
-func (ir *InviteRepository) generateMoreInviteCodes(codeAmount int) {
+func (ir *InviteRepository) GenerateMoreInviteCodes(codeAmount int) {
 	newCodes := ir.GenerateUniqueCodes(codeAmount)
 	for _, code := range newCodes {
-		err := ir.createNewInviteCode(code.Value, code.Active)
+		err := ir.CreateNewInviteCode(code.Value, code.Active)
 		if err != nil {
 			log.Println("createNewInviteCode() error:", err)
 		}
 	}
-	ir.inviteCodeMap = ir.AddInviteCodes(ir.inviteCodeMap, newCodes)
+	ir.InviteCodeMap = ir.AddInviteCodes(ir.InviteCodeMap, newCodes)
 }
 
-func (ir *InviteRepository) checkValidInviteCode(ic string) bool {
-	if _, ok := ir.inviteCodeMap[ic]; ok {
-		if ir.inviteCodeMap[ic].Active {
+func (ir *InviteRepository) CheckValidInviteCode(ic string) bool {
+	if _, ok := ir.InviteCodeMap[ic]; ok {
+		if ir.InviteCodeMap[ic].Active {
 			return true
 		} else {
 			return false

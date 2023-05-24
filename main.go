@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/base64"
 
@@ -20,9 +19,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
+	"shadowchat/internal/models"
 	"shadowchat/utils"
 	"sort"
 	"strconv"
@@ -31,7 +29,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gabstv/go-monero/walletrpc"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 	qrcode "github.com/skip2/go-qrcode"
@@ -41,9 +38,6 @@ import (
 
 const username = "admin"
 
-var pending_donos []utils.SuperChat
-var ip_requests []string
-
 var USDMinimum float64 = 5
 var MediaMin float64 = 0.025 // Currently unused
 var MessageMaxChar int = 250
@@ -51,8 +45,6 @@ var NameMaxChar int = 25
 var starting_port int = 28088
 
 var host_url string = "https://ferret.cash/"
-
-var addressSliceSolana []utils.AddressSolana
 
 var checked string = ""
 var killDono = 35.00 * time.Minute // hours it takes for a dono to be unfulfilled before it is no longer checked.
@@ -79,30 +71,17 @@ var logoutTemplate *template.Template
 var incorrectPasswordTemplate *template.Template
 var baseCheckingRate = 25
 
-var eth_transactions []utils.Transfer
-
 var minSolana, minMonero, minEthereum, minPaint, minHex, minPolygon, minBusd, minShib, minUsdc, minTusd, minWbtc, minPnk float64 // Global variables to hold minimum values required to equal the global value.
 var minDonoValue float64 = 5.0
-
-var solWallets = map[int]utils.SolWallet{}
-
-var inviteCodeMap = map[string]utils.InviteCode{}
 
 var PublicRegistrationsEnabled = false
 
 var ServerMinMediaDono = 5
 var ServerMediaEnabled = true
 
-var xmrWallets = [][]int{}
-
-var globalUsers = map[int]utils.User{}
-var pendingGlobalUsers = map[int]utils.PendingUser{}
-
 var db *sql.DB
-var userSessions = make(map[string]int)
 var amountNeeded = 1000.00
 var amountSent = 200.00
-var donosMap = make(map[int]utils.Dono) // initialize an empty map
 
 var a utils.AlertPageData
 var pb utils.ProgressbarData
@@ -137,7 +116,7 @@ var tableTemplate = template.Must(template.New("table").Parse(`
 	{{end}}
 `))
 
-func checkLoggedIn(w http.ResponseWriter, r *http.Request) {
+func checkLoggedIn(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
 		fmt.Println(err)
@@ -145,20 +124,20 @@ func checkLoggedIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, valid := getUserBySessionCached(cookie.Value)
+	_, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 }
 
-func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request) bool {
+func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) bool {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
 		return false
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		return false
 	}
@@ -170,19 +149,8 @@ func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request) bool {
 	}
 }
 
-func generateMoreInviteCodes(codeAmount int) {
-	newCodes := utils.GenerateUniqueCodes(codeAmount)
-	for _, code := range newCodes {
-		err := createNewInviteCode(code.Value, code.Active)
-		if err != nil {
-			log.Println("createNewInviteCode() error:", err)
-		}
-	}
-	inviteCodeMap = utils.AddInviteCodes(inviteCodeMap, newCodes)
-}
-
 // Handler function for the "/donations" endpoint
-func donationsHandler(w http.ResponseWriter, r *http.Request) {
+func donationsHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
 	log.Println("donationsHandler Called")
 
 	cookie, err := r.Cookie("session_token")
@@ -190,14 +158,14 @@ func donationsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := dr.UserRepo.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		return
 	}
 	// Fetch the latest data from your database or other data source
 
 	// Retrieve data from the donos table
-	rows, err := db.Query("SELECT * FROM donos WHERE fulfilled = 1 AND amount_sent != '0.0' ORDER BY created_at DESC")
+	rows, err := dr.Db.Query("SELECT * FROM donos WHERE fulfilled = 1 AND amount_sent != '0.0' ORDER BY created_at DESC")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -265,39 +233,47 @@ func main() {
 	}
 	defer db.Close()
 
+	// set up repositories
+	sr := models.NewSolRepository(db)
+	ir := models.NewInviteRepository(db)
+	br := models.NewBillingRepository(db)
+	ur := models.NewUserRepository(db, sr, br)
+	mr := models.NewMoneroRepository(db, ur)
+	dr := models.NewDonoRepository(db, ur, mr)
+
 	// Check if the database and tables exist, and create them if they don't
-	err = createDatabaseIfNotExists(db)
+	err = models.CreateDatabaseIfNotExists(db, ur)
 	if err != nil {
-		panic(err)
+		log.Printf("Error creating database: %v", err)
 	}
 
 	// Run migrations on database
-	err = runDatabaseMigrations(db)
+	err = models.RunDatabaseMigrations(db)
 	if err != nil {
-		panic(err)
+		log.Printf("Error migrating database: %v", err)
 	}
 
-	go startWallets()
+	go models.StartWallets(ur, mr, sr)
 
 	time.Sleep(5 * time.Second)
 	log.Println("Starting server")
 
-	setupRoutes()
+	setupRoutes(ur)
 
 	time.Sleep(2 * time.Second)
 	// Schedule a function to run fetchExchangeRates every three minutes
-	go fetchExchangeRates()
-	go checkDonos()
-	go checkPendingAccounts()
-	go checkBillingAccounts()
+	go models.FetchExchangeRates(ur)
+	go dr.Check()
+	go models.CheckPendingAccounts(dr)
+	go models.CheckBillingAccounts(dr)
 
-	go checkAccountBillings()
+	go dr.CheckAccountBillings()
 
 	a.Refresh = 10
 	pb.Refresh = 1
-	obsData = getObsData(db, 1)
-	inviteCodeMap = getAllCodes()
-	setServerVars()
+	_ = ur.GetObsData(1)
+	inviteCodeMap = ir.GetAllCodes()
+	models.SetServerVars(ur)
 
 	//go createTestDono(2, "Big Bob", "XMR", "This Cruel Message is Bob's Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! ", "50", 100, "https://www.youtube.com/watch?v=6iseNlvH2_s")
 	// go createTestDono("Medium Bob", "XMR", "Hey it's medium Bob ", 0.1, 3, "https://www.youtube.com/watch?v=6iseNlvH2_s")
@@ -379,80 +355,80 @@ func mapToCryptosEnabled(selectedCryptos map[string]bool) utils.CryptosEnabled {
 	// Return the populated CryptosEnabled struct
 	return cryptosEnabled
 }
-func setupRoutes() {
+func setupRoutes(ur *models.UserRepository) {
 	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/style.css")
+		http.ServeFile(w, r, "web/css/style.css")
 	})
 
 	http.HandleFunc("/xmr.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/xmr.svg")
+		http.ServeFile(w, r, "web/img/xmr.svg")
 	})
 
 	http.HandleFunc("/bignumber.js", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/js/bignumber.js")
+		http.ServeFile(w, r, "web/js/bignumber.js")
 	})
 
 	http.HandleFunc("/checkmark.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/xmr.png")
+		http.ServeFile(w, r, "web/img/xmr.png")
 	})
 
 	http.HandleFunc("/fcash.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/fcash.png")
+		http.ServeFile(w, r, "web/img/fcash.png")
 	})
 
 	http.HandleFunc("/indexfcash.png", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/indexfcash.png")
+		http.ServeFile(w, r, "web/img/indexfcash.png")
 	})
 
 	http.HandleFunc("/loader.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/loader.svg")
+		http.ServeFile(w, r, "web/img/loader.svg")
 	})
 
 	http.HandleFunc("/eth.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/eth.svg")
+		http.ServeFile(w, r, "web/img/eth.svg")
 	})
 
 	http.HandleFunc("/sol.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/sol.svg")
+		http.ServeFile(w, r, "web/img/sol.svg")
 	})
 
 	http.HandleFunc("/busd.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/busd.svg")
+		http.ServeFile(w, r, "web/img/busd.svg")
 	})
 
 	http.HandleFunc("/hex.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/hex.svg")
+		http.ServeFile(w, r, "web/img/hex.svg")
 	})
 
 	http.HandleFunc("/matic.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/matic.svg")
+		http.ServeFile(w, r, "web/img/matic.svg")
 	})
 
 	http.HandleFunc("/paint.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/paint.svg")
+		http.ServeFile(w, r, "web/img/paint.svg")
 	})
 
 	http.HandleFunc("/pnk.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/pnk.svg")
+		http.ServeFile(w, r, "web/img/pnk.svg")
 	})
 
 	http.HandleFunc("/shiba_inu.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/shiba_inu.svg")
+		http.ServeFile(w, r, "web/img/shiba_inu.svg")
 	})
 
 	http.HandleFunc("/tether.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/tether.svg")
+		http.ServeFile(w, r, "web/img/tether.svg")
 	})
 
 	http.HandleFunc("/usdc.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/usdc.svg")
+		http.ServeFile(w, r, "web/img/usdc.svg")
 	})
 
 	http.HandleFunc("/wbtc.svg", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/wbtc.svg")
+		http.ServeFile(w, r, "web/img/wbtc.svg")
 	})
 
-	http.Handle("/media/", http.StripPrefix("/media/", http.FileServer(http.Dir("web/templates/obs/media/"))))
+	http.Handle("/media/", http.StripPrefix("/media/", http.FileServer(http.Dir("web/obs/media/"))))
 	http.Handle("/users/", http.StripPrefix("/users/", http.FileServer(http.Dir("users/"))))
 
 	routes_ = []Route_{
@@ -467,7 +443,9 @@ func setupRoutes() {
 		{"/viewdonos", viewDonosHandler},
 		{"/replaydono", replayDonoHandler},
 		{"/progressbar", progressbarOBSHandler},
-		{"/login", loginHandler},
+		{"/login", func(w http.ResponseWriter, r *http.Request) {
+			loginHandler(w, r, ur)
+		}},
 		{"/incorrect_login", incorrectLoginHandler},
 		{"/user", userHandler},
 		{"/userobs", userOBSHandler},
@@ -490,16 +468,16 @@ func setupRoutes() {
 		http.HandleFunc(route_.Path, logging(route_.Handler))
 	}
 
-	indexTemplate, _ = template.ParseFiles("web/index.html")
+	indexTemplate, _ = template.ParseFiles("web/templates/index.html")
 
 	overflowTemplate, _ = template.ParseFiles("web/overflow.html")
-	tosTemplate, _ = template.ParseFiles("web/tos.html")
-	registerTemplate, _ = template.ParseFiles("web/new_account.html")
-	donationTemplate, _ = template.ParseFiles("web/donation.html")
-	footerTemplate, _ = template.ParseFiles("web/footer.html")
-	payTemplate, _ = template.ParseFiles("web/pay.html")
-	alertTemplate, _ = template.ParseFiles("web/alert.html")
-	accountPayTemplate, _ = template.ParseFiles("web/accountpay.html")
+	tosTemplate, _ = template.ParseFiles("web/templates/tos.html")
+	registerTemplate, _ = template.ParseFiles("web/templates/new_account.html")
+	donationTemplate, _ = template.ParseFiles("web/templates/donation.html")
+	footerTemplate, _ = template.ParseFiles("web/templates/footer.html")
+	payTemplate, _ = template.ParseFiles("web/templates/pay.html")
+	alertTemplate, _ = template.ParseFiles("web/templates/alert.html")
+	accountPayTemplate, _ = template.ParseFiles("web/templates/accountpay.html")
 
 	billPayTemplate, _ = template.ParseFiles("web/templates/billpay.html")
 
@@ -513,29 +491,6 @@ func setupRoutes() {
 
 	logoutTemplate, _ = template.ParseFiles("web/templates/logout.html")
 	incorrectPasswordTemplate, _ = template.ParseFiles("web/templates/password_change_failed.html")
-}
-
-func clearRecentIPS(ip string) {
-	for {
-		ip_requests = ip_requests[:0]
-		time.Sleep(5 * time.Minute)
-	}
-}
-
-func CheckRecentIPRequests(ip string) int {
-	matching_ips := 0
-	for _, ip_ := range ip_requests {
-		err := bcrypt.CompareHashAndPassword([]byte(ip_), []byte(ip))
-		if err == nil {
-			matching_ips++
-			if matching_ips == 80 {
-				ip_requests = append(ip_requests, encryptIP(ip))
-				return matching_ips
-			}
-		}
-	}
-	ip_requests = append(ip_requests, encryptIP(ip))
-	return matching_ips
 }
 
 func logging(f http.HandlerFunc) http.HandlerFunc {
@@ -581,43 +536,6 @@ func replayDonoHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send response indicating success
 	w.WriteHeader(http.StatusOK)
-}
-
-func startWallets() {
-	printUserColumns()
-	users, err := getAllUsers()
-	if err != nil {
-		log.Fatalf("startWallet() error: %v", err)
-	}
-
-	for _, user := range users {
-		log.Println("Checking user:", user.Username, "User ID:", user.UserID, "User billing data enabled:", user.BillingData.Enabled)
-		if user.BillingData.Enabled {
-			log.Println("User valid", user.UserID, "User eth_address:", globalUsers[user.UserID].EthAddress)
-			if user.WalletUploaded {
-				log.Println("Monero wallet uploaded")
-				xmrWallets = append(xmrWallets, []int{user.UserID, starting_port})
-				go startMoneroWallet(starting_port, user.UserID, user)
-				starting_port++
-
-			} else {
-				log.Println("Monero wallet not uploaded")
-			}
-		} else {
-			log.Println("startWallets() User not valid")
-		}
-	}
-
-	fmt.Println("startWallet() starting monitoring of solana addresses.")
-	for _, user := range users {
-		solWallets[user.UserID] = utils.SolWallet{
-			Address: user.SolAddress,
-			Amount:  0.00,
-		}
-	}
-
-	utils.SetSolWallets(solWallets)
-	go utils.StartMonitoringSolana()
 }
 
 func checkValidSubscription(DateEnabled time.Time) bool {
@@ -724,332 +642,6 @@ func refreshHandler(w http.ResponseWriter, r *http.Request) {
 	allUsersHandler(w, r)
 }
 
-func updateEnabledDate(userID int) error {
-	// Get the current time
-	now := time.Now()
-
-	// Update the user's enabled date in the database
-	_, err := db.Exec("UPDATE users SET date_enabled=? WHERE id=?", now, userID)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func getAllCodes() map[string]utils.InviteCode {
-
-	rows, err := db.Query("SELECT * FROM invites")
-	if err != nil {
-		log.Println(err)
-		return inviteCodeMap
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var ic utils.InviteCode
-
-		err = rows.Scan(&ic.Value, &ic.Active)
-
-		if err != nil {
-			log.Println(err)
-			return inviteCodeMap
-		}
-		inviteCodeMap[ic.Value] = ic
-	}
-
-	return inviteCodeMap
-
-}
-
-func getAllUsers() ([]utils.User, error) {
-	var users []utils.User
-	rows, err := db.Query("SELECT * FROM users")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var user utils.User
-		var links, donoGIF, donoSound, alertURL, defaultCrypto, cryptosEnabled sql.NullString
-
-		err = rows.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-			&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-			&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound,
-			&alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-
-		if err != nil {
-			return nil, err
-		}
-
-		user.Links = links.String
-		if !links.Valid {
-			user.Links = ""
-		}
-
-		user.DonoGIF = donoGIF.String
-		if !donoGIF.Valid {
-			user.DonoGIF = "default.gif"
-		}
-
-		user.DonoSound = donoSound.String
-		if !donoSound.Valid {
-			user.DonoSound = "default.mp3"
-		}
-
-		user.DefaultCrypto = defaultCrypto.String
-		if !defaultCrypto.Valid {
-			user.DefaultCrypto = ""
-		}
-
-		user.AlertURL = alertURL.String
-		if !alertURL.Valid {
-			user.AlertURL = utils.GenerateUniqueURL()
-		}
-
-		ce := utils.CryptosEnabled{
-			XMR:   true,
-			SOL:   true,
-			ETH:   false,
-			PAINT: false,
-			HEX:   true,
-			MATIC: false,
-			BUSD:  true,
-			SHIB:  false,
-			PNK:   true,
-		}
-
-		user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String)
-		if !cryptosEnabled.Valid {
-			log.Println("user cryptos enabled not fixed")
-			user.CryptosEnabled = ce
-		}
-
-		users = append(users, user)
-	}
-
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-
-	billings, err := getAllBilling()
-	if err != nil {
-		return nil, err
-	}
-
-	billingMap := make(map[int]utils.BillingData)
-	for _, billing := range billings {
-		billingMap[billing.UserID] = billing
-	}
-
-	for i := range users {
-		billing, ok := billingMap[users[i].UserID]
-		if ok {
-			users[i].BillingData = billing
-			globalUsers[users[i].UserID] = users[i]
-		}
-	}
-
-	return users, nil
-}
-
-func getAllBilling() ([]utils.BillingData, error) {
-	var billings []utils.BillingData
-	rows, err := db.Query("SELECT * FROM billing")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var billingData utils.BillingData
-		err = rows.Scan(&billingData.BillingID, &billingData.UserID, &billingData.AmountThisMonth, &billingData.AmountTotal, &billingData.Enabled, &billingData.NeedToPay, &billingData.ETHAmount, &billingData.XMRAmount, &billingData.XMRPayID, &billingData.CreatedAt, &billingData.UpdatedAt)
-		if err != nil {
-			log.Println(err)
-		}
-
-		fmt.Println("UserID: ", billingData.UserID)
-		fmt.Println("Amount This Month: ", billingData.AmountThisMonth)
-		fmt.Println("Amount Total: ", billingData.AmountTotal)
-		fmt.Println("Enabled: ", billingData.Enabled)
-		fmt.Println("Need To Pay: ", billingData.NeedToPay)
-		fmt.Println("Created At: ", billingData.CreatedAt)
-		fmt.Println("Updated At: ", billingData.UpdatedAt)
-
-		billings = append(billings, billingData)
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Println(err)
-		return nil, err
-	}
-
-	return billings, nil
-}
-
-func getActiveETHUsers(db *sql.DB) ([]*utils.User, error) {
-	var users []*utils.User
-
-	// Define the query to select the active ETH users
-	query := `SELECT * FROM users WHERE eth_address != ''`
-
-	// Execute the query
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-
-	for rows.Next() {
-		var user utils.User
-		err = rows.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress, &user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono, &user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &user.Links, &user.DonoGIF, &user.DonoSound, &user.AlertURL, &user.WalletUploaded, &user.DateEnabled)
-		if err != nil {
-			return nil, err
-		}
-
-		oneMonthAhead := user.DateEnabled.AddDate(0, 1, 0)
-		if oneMonthAhead.After(time.Now().UTC()) {
-			users = append(users, &user)
-		}
-	}
-	return users, nil
-}
-
-func getActiveXMRUsers(db *sql.DB) ([]*utils.User, error) {
-	var users []*utils.User
-
-	// Define the query to select the active XMR users
-	query := `SELECT * FROM users WHERE wallet_uploaded = ?`
-
-	// Execute the query
-	rows, err := db.Query(query, true)
-	if err != nil {
-		return nil, err
-	}
-
-	for rows.Next() {
-		var user utils.User
-		err = rows.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress, &user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono, &user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &user.Links, &user.DonoGIF, &user.DonoSound, &user.AlertURL, &user.WalletUploaded, &user.DateEnabled)
-		if err != nil {
-			return nil, err
-		}
-
-		oneMonthAhead := user.DateEnabled.AddDate(0, 1, 0)
-		if oneMonthAhead.After(time.Now().UTC()) {
-			users = append(users, &user)
-		}
-
-	}
-	return users, nil
-}
-
-func getUserCryptosEnabled(user utils.User) (utils.User, error) {
-
-	user.CryptosEnabled.XMR = false
-	user.CryptosEnabled.SOL = false
-	user.CryptosEnabled.ETH = false
-	user.CryptosEnabled.PAINT = true
-	user.CryptosEnabled.HEX = false
-	user.CryptosEnabled.MATIC = true
-	user.CryptosEnabled.BUSD = false
-	user.CryptosEnabled.SHIB = true
-	user.CryptosEnabled.PNK = false
-
-	return user, nil
-
-}
-
-// get links for a user
-func getUserLinks(user utils.User) ([]utils.Link, error) {
-	if user.Links == "" {
-		// Insert default links for the user
-		defaultLinks := []utils.Link{
-			{URL: "https://powerchat.live/paultown?tab=donation", Description: "Powerchat"},
-			{URL: "https://cozy.tv/paultown", Description: "cozy.tv/paultown"},
-			{URL: "http://twitter.paul.town/", Description: "Twitter"},
-			{URL: "https://t.me/paultownreal", Description: "Telegram"},
-			{URL: "http://notes.paul.town/", Description: "notes.paul.town"},
-		}
-
-		jsonLinks, err := json.Marshal(defaultLinks)
-		if err != nil {
-			return nil, err
-		}
-
-		user.Links = string(jsonLinks)
-		if err := updateUser(user); err != nil {
-			return nil, err
-		}
-
-		return defaultLinks, nil
-	}
-
-	var links []utils.Link
-	if err := json.Unmarshal([]byte(user.Links), &links); err != nil {
-		return nil, err
-	}
-
-	return links, nil
-}
-
-func setServerVars() {
-	log.Println("Starting.")
-	log.Println("		 ..")
-	time.Sleep(2 * time.Second)
-	log.Println("------------ setServerVars()")
-	setMinDonos()
-}
-
-func createTestDono(user_id int, name string, curr string, message string, amount string, usdAmount float64, media_url string) {
-	valid, media_url_ := checkDonoForMediaUSDThreshold(media_url, usdAmount)
-
-	if valid == false {
-		media_url_ = ""
-	}
-
-	log.Println("TESTING DONO IN FIVE SECONDS")
-	time.Sleep(5 * time.Second)
-	log.Println("TESTING DONO NOW")
-	err := createNewQueueEntry(db, user_id, "TestAddress", name, message, amount, curr, usdAmount, media_url_)
-	if err != nil {
-		panic(err)
-	}
-	addDonoToDonoBar(amount, curr, user_id)
-}
-
-func replayDono(donation utils.Donation, userID int) {
-	valid, media_url_ := checkDonoForMediaUSDThreshold(donation.DonationMedia, convertToFloat64(donation.USDValue))
-
-	if valid == false {
-		media_url_ = ""
-	}
-
-	err := createNewQueueEntry(db, userID, "ReplayAddress", donation.DonationName, donation.DonationMessage, donation.AmountSent, donation.Crypto, convertToFloat64(donation.USDValue), media_url_)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func convertToFloat64(value string) float64 {
-	f, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		panic(err)
-	}
-	return f
-}
-
-// extractVideoID extracts the video ID from a YouTube URL
-func extractVideoID(url string) string {
-	videoID := ""
-	// Use a regular expression to extract the video ID from the YouTube URL
-	re := regexp.MustCompile(`v=([\w-]+)`)
-	match := re.FindStringSubmatch(url)
-	if len(match) == 2 {
-		videoID = match[1]
-	}
-	return videoID
-}
-
 func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 
 	cookie, err := r.Cookie("session_token")
@@ -1142,1805 +734,11 @@ func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 	tpl.Execute(w, data)
 }
 
-func setUserMinDonos(user utils.User) utils.User {
-	var err error
-	user.MinSol, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Solana)), 64)
-	user.MinEth, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Ethereum)), 64)
-	user.MinXmr, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Monero)), 64)
-	user.MinPaint, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Paint)), 64)
-	user.MinHex, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Hexcoin)), 64)
-	user.MinMatic, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Polygon)), 64)
-	user.MinBusd, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.BinanceUSD)), 64)
-	user.MinShib, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.ShibaInu)), 64)
-	user.MinUsdc, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono))), 64)
-	user.MinTusd, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono))), 64)
-	user.MinWbtc, _ = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.WBTC)), 64)
-	user.MinPnk, err = strconv.ParseFloat(fmt.Sprintf("%.5f", (float64(user.MinDono)/prices.Kleros)), 64)
-	if err != nil {
-		log.Println("setUserMinDonos() err:", err)
-	}
-
-	return user
-}
-
-func setMinDonos() {
-	for i := range globalUsers {
-		globalUsers[i] = setUserMinDonos(globalUsers[i])
-	}
-}
-
-func fetchExchangeRates() {
-	for {
-		// Fetch the exchange rate data from the API
-		var err error
-		prices, err = utils.GetCryptoPrices()
-		if err != nil {
-			log.Println(err)
-		} else {
-			setMinDonos()
-		}
-
-		time.Sleep(80 * time.Second)
-	}
-
-}
-
 func createNewEthDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) utils.SuperChat {
 	new_dono := utils.CreatePendingDono(name, message, mediaURL, amountNeeded, cryptoCode, encrypted_ip)
 	pending_donos = utils.AppendPendingDono(pending_donos, new_dono)
 
 	return new_dono
-}
-
-func startMoneroWallet(portInt, userID int, user utils.User) {
-	portID := getPortID(xmrWallets, userID)
-	found := true
-
-	if portID == -100 {
-		found = false
-	}
-
-	portStr := strconv.Itoa(portID)
-
-	if found {
-		fmt.Println("Port ID for user", userID, "is", portID)
-	} else {
-		fmt.Println("Port ID not found for user", userID)
-		portStr = strconv.Itoa(portInt)
-	}
-
-	cmd := exec.Command("./start_xmr_wallet.sh", portStr, strconv.Itoa(userID))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	err := cmd.Run()
-	if err != nil {
-		log.Println("Error running command:", err)
-		walletRunning := CheckMoneroPort(userID)
-		if walletRunning {
-			user.WalletUploaded = true
-			user.WalletPending = false
-		} else {
-			user.WalletUploaded = false
-			user.WalletPending = false
-		}
-		updateUser(user)
-		return
-	}
-
-	_ = walletrpc.New(walletrpc.Config{
-		Address: "http://127.0.0.1:" + strconv.Itoa(portInt) + "/json_rpc",
-	})
-
-	fmt.Println("Done starting monero wallet for", portStr, userID)
-	user.WalletUploaded = true
-	user.WalletPending = true
-	updateUser(user)
-}
-
-func CheckMoneroPort(userID int) bool {
-	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
-	portID := getPortID(xmrWallets, userID)
-
-	found := true
-	if portID == -100 {
-		return false
-	}
-
-	if found {
-		fmt.Println("Port ID for user", userID, "is", portID)
-	} else {
-		fmt.Println("Port ID not found for user", userID)
-	}
-
-	rpcURL_ := "http://127.0.0.1:" + strconv.Itoa(portID) + "/json_rpc"
-
-	req, err := http.NewRequest("POST", rpcURL_, payload)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-
-	resp := &utils.RPCResponse{}
-	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
-		return false
-	}
-
-	return true
-}
-
-func stopMoneroWallet(user utils.User) {
-	portID := getPortID(xmrWallets, user.UserID)
-
-	found := true
-	if portID == -100 {
-		found = false
-	}
-
-	if !found {
-		fmt.Println("Port ID not found for user", user.UserID)
-		return
-	}
-
-	portStr := strconv.Itoa(portID)
-
-	cmd := exec.Command("monero/monero-wallet-rpc", "--rpc-bind-port", portStr, "--command", "stop_wallet")
-
-	// Capture the output of the command
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Error running command: %v\n", err)
-		return
-	}
-
-	// Print the output of the command
-	fmt.Println(string(output))
-}
-
-func checkDonos() {
-	for {
-		log.Println("Checking pending wallets for successful starting")
-		for _, u_ := range globalUsers {
-			if u_.WalletUploaded && u_.WalletPending {
-				u_.WalletPending = CheckMoneroPort(u_.UserID)
-				if !u_.WalletPending {
-					updateUser(u_)
-				}
-			}
-		}
-
-		log.Println("Checking donos via checkDonos()")
-		fulfilledDonos := checkUnfulfilledDonos()
-		if len(fulfilledDonos) > 0 {
-			fmt.Println("Fulfilled Donos:")
-		}
-
-		for _, dono := range fulfilledDonos {
-			fmt.Println(dono)
-			user := globalUsers[dono.UserID]
-			if user.BillingData.AmountTotal >= 500 {
-				user.BillingData.AmountThisMonth += dono.USDAmount
-			} else if user.BillingData.AmountTotal+dono.USDAmount >= 500 {
-				user.BillingData.AmountThisMonth += user.BillingData.AmountTotal + dono.USDAmount - 500
-			}
-			user.BillingData.AmountTotal += dono.USDAmount
-			updateUser(user)
-
-			err := createNewQueueEntry(db, dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountSent, dono.CurrencyType, dono.USDAmount, dono.MediaURL)
-			if err != nil {
-				panic(err)
-			}
-
-		}
-		time.Sleep(time.Duration(25) * time.Second)
-	}
-}
-
-func getAdminETHAdd() string {
-	user, validUser := getUserByUsernameCached(username)
-
-	if !validUser {
-		return ""
-	}
-
-	return user.EthAddress
-}
-
-func checkBillingAccounts() {
-	for {
-		tMapGenerated := false
-		transactionMap := make(map[string]utils.Transfer)
-
-		for _, user := range globalUsers {
-
-			if user.BillingData.NeedToPay {
-
-				xmrFl, _ := getXMRBalance(user.BillingData.XMRPayID, 1)
-				xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
-				xmrSentStr, _ := utils.StandardizeString(xmrSent)
-				if user.BillingData.XMRAmount == xmrSentStr {
-					renewUserSubscription(user)
-					continue
-				}
-
-				adminETHAdd := getAdminETHAdd()
-
-				if !tMapGenerated { //Generate Map from transaction slice
-					for _, transaction := range eth_transactions {
-						hash := utils.GetTransactionAmount(transaction)
-						standard_hash, _ := utils.StandardizeString(hash)
-						transactionMap[standard_hash] = transaction
-					}
-					tMapGenerated = true
-				}
-
-				valueToCheck, _ := utils.StandardizeString(user.BillingData.ETHAmount)
-				transaction, ok := transactionMap[valueToCheck]
-				if ok {
-					tN := utils.GetTransactionToken(transaction)
-					if tN == "ETH" && transaction.To == adminETHAdd {
-						renewUserSubscription(user)
-						continue
-					}
-				}
-			}
-		}
-		time.Sleep(time.Duration(30) * time.Second)
-	}
-}
-
-func renewUserSubscription(user utils.User) {
-	user.BillingData.Enabled = true
-	user.BillingData.AmountThisMonth = 0.00
-	user.BillingData.AmountNeeded = 0.00
-	user.BillingData.NeedToPay = false
-	user.BillingData.UpdatedAt = time.Now().UTC()
-	updateUser(user)
-}
-
-func checkPendingAccounts() {
-	for {
-
-		for _, transaction := range eth_transactions {
-			tN := utils.GetTransactionToken(transaction)
-			if tN == "ETH" && transaction.To == getAdminETHAdd() {
-				valueStr := fmt.Sprintf("%.18f", transaction.Value)
-
-				for _, user := range pendingGlobalUsers {
-					if user.ETHNeeded == valueStr {
-						err := createNewUserFromPending(user)
-						if err != nil {
-							log.Println("Error marking payment as complete:", err)
-						} else {
-							log.Println("Payment marked as complete for:", user.Username)
-						}
-					}
-				}
-			}
-		}
-
-		for _, user := range pendingGlobalUsers {
-			xmrFl, _ := getXMRBalance(user.XMRPayID, 1)
-			xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
-
-			log.Println("XMR sent:", xmrSent)
-			xmrSentStr, _ := utils.ConvertStringTo18DecimalPlaces(xmrSent)
-			log.Println("XMR sent str:", xmrSentStr)
-			log.Println("XMRNeeded str:", user.XMRNeeded)
-			if user.XMRNeeded == xmrSentStr {
-				err := createNewUserFromPending(user)
-				if err != nil {
-					log.Println("Error marking payment as complete:", err)
-				} else {
-					log.Println("Payment marked as complete for:", user.Username)
-				}
-			}
-		}
-
-		time.Sleep(time.Duration(25) * time.Second)
-	}
-}
-
-func checkAccountBillings() {
-	for {
-		for _, user := range globalUsers {
-			if user.BillingData.Enabled {
-				// check if the updated amount is from the current or previous month
-				now := time.Now()
-				updatedMonth := user.BillingData.UpdatedAt.Month()
-				currentMonth := now.Month()
-				if user.BillingData.AmountTotal >= 500 {
-
-					if updatedMonth == currentMonth {
-						continue
-					} else if now.Day() >= 4 {
-						// the updated amount is from an earlier month, so disable billing
-						user.BillingData.Enabled = false
-						user.BillingData.NeedToPay = true
-						user.BillingData.AmountNeeded = math.Round(user.BillingData.AmountThisMonth*0.03*100) / 100
-
-						xmrNeeded := getXMRAmountInUSD(user.BillingData.AmountNeeded)
-						ethNeeded := getETHAmountInUSD(user.BillingData.AmountNeeded)
-
-						PayID, PayAddress := getNewAccountXMR()
-						user.BillingData.XMRPayID = PayID
-						user.BillingData.XMRAddress = PayAddress
-						user.BillingData.XMRAmount = xmrNeeded
-						user.BillingData.ETHAmount = ethNeeded
-
-						fmt.Printf("Disabling billing for user %d\n", user.UserID)
-					} else {
-						user.BillingData.NeedToPay = true
-						user.BillingData.Enabled = true
-					}
-				} else {
-					renewUserSubscription(user)
-				}
-			}
-		}
-		time.Sleep(time.Duration(12) * time.Hour)
-	}
-}
-
-func getUSDValue(as float64, c string) float64 {
-	usdVal := 0.00
-
-	priceMap := map[string]float64{
-		"XMR":   prices.Monero,
-		"SOL":   prices.Solana,
-		"ETH":   prices.Ethereum,
-		"PAINT": prices.Paint,
-		"HEX":   prices.Hexcoin,
-		"MATIC": prices.Polygon,
-		"BUSD":  prices.BinanceUSD,
-		"SHIB":  prices.ShibaInu,
-		"PNK":   prices.Kleros,
-	}
-
-	if price, ok := priceMap[c]; ok {
-		usdVal = as * price
-	} else {
-		usdVal = 1.00
-		return usdVal
-	}
-	usdValStr := fmt.Sprintf("%.2f", usdVal)      // format usdVal as a string with 2 decimal points
-	usdVal, _ = strconv.ParseFloat(usdValStr, 64) // convert the string back to a float
-
-	return usdVal
-}
-
-func addDonoToDonoBar(as, c string, userID int) {
-	f, err := strconv.ParseFloat(as, 64)
-	usdVal := getUSDValue(f, c)
-	obsData, err := getOBSDataByUserID(userID)
-	pb.Sent = obsData.Sent
-	pb.Needed = obsData.Needed
-	pb.Message = obsData.Message
-	pb.Sent += usdVal
-
-	sent, err := strconv.ParseFloat(fmt.Sprintf("%.2f", pb.Sent), 64)
-	if err != nil {
-		// handle the error here
-		log.Println("Error converting to cents: ", err)
-	}
-	pb.Sent = sent
-
-	amountSent = pb.Sent
-
-	err = updateObsData(db, userID, obsData.FilenameGIF, obsData.FilenameMP3, "alice", pb)
-
-	if err != nil {
-		log.Println("Error: ", err)
-	}
-}
-
-func formatMediaURL(media_url string) string {
-	isValid, timecode, properLink := isYouTubeLink(media_url)
-	log.Println(isValid, timecode, properLink)
-
-	embedLink := ""
-	if isValid {
-		videoID := extractVideoID(properLink)
-		embedLink = fmt.Sprintf(videoID)
-	}
-	return embedLink
-}
-
-func createNewQueueEntry(db *sql.DB, user_id int, address string, name string, message string, amount string, currency string, dono_usd float64, media_url string) error {
-	f, err := strconv.ParseFloat(amount, 64)
-	if err != nil {
-		panic(err)
-	}
-	// Round the amount to 6 decimal places if it has more than 6 decimal places
-	if math.Abs(f-math.Round(f)) >= 0.000001 {
-		f = math.Round(f*1e6) / 1e6
-	}
-
-	embedLink := formatMediaURL(media_url)
-
-	_, err = db.Exec(`
-		INSERT INTO queue (name, message, amount, currency, usd_amount, media_url, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, name, message, amount, currency, dono_usd, embedLink, user_id)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func isYouTubeLink(link string) (bool, int, string) {
-	var timecode int
-	var properLink string
-
-	youtubeRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([^&]+)(?:\?t=)?(\d*)$`)
-	embedRegex := regexp.MustCompile(`^(?:https?://)?(?:www\.)?youtube\.com/embed/([^?]+)(?:\?start=)?(\d*)$`)
-
-	if youtubeMatches := youtubeRegex.FindStringSubmatch(link); youtubeMatches != nil {
-		if len(youtubeMatches[2]) > 0 {
-			fmt.Sscanf(youtubeMatches[2], "%d", &timecode)
-		}
-		properLink = "https://www.youtube.com/watch?v=" + youtubeMatches[1]
-		return true, timecode, properLink
-	}
-
-	if embedMatches := embedRegex.FindStringSubmatch(link); embedMatches != nil {
-		if len(embedMatches[2]) > 0 {
-			fmt.Sscanf(embedMatches[2], "%d", &timecode)
-		}
-		properLink = "https://www.youtube.com/watch?v=" + embedMatches[1]
-		return true, timecode, properLink
-	}
-
-	return false, 0, ""
-}
-
-func checkDonoForMediaUSDThreshold(media_url string, dono_usd float64) (bool, string) {
-	valid := true
-	if dono_usd < float64(ServerMinMediaDono) {
-		media_url = ""
-		valid = false
-
-	}
-	return valid, media_url
-}
-
-func createNewDono(user_id int, dono_address string, dono_name string, dono_message string, amount_to_send string, currencyType string, encrypted_ip string, anon_dono bool, dono_usd float64, media_url string) int64 {
-	// Open a new database connection
-	db, err := sql.Open("sqlite3", "users.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	// Get current time
-	createdAt := time.Now().UTC()
-
-	valid, media_url_ := checkDonoForMediaUSDThreshold(media_url, dono_usd)
-
-	if valid == false {
-		media_url_ = ""
-	}
-
-	amount_to_send, _ = utils.StandardizeString(amount_to_send)
-
-	// Execute the SQL INSERT statement
-	result, err := db.Exec(`
-        INSERT INTO donos (
-            user_id,
-            dono_address,
-            dono_name,
-            dono_message,
-            amount_to_send,
-            amount_sent,
-            currency_type,
-            anon_dono,
-            fulfilled,
-            encrypted_ip,
-            created_at,
-            updated_at,
-            usd_amount,
-            media_url
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, user_id, dono_address, dono_name, dono_message, amount_to_send, "0.0", currencyType, anon_dono, false, encrypted_ip, createdAt, createdAt, dono_usd, media_url_)
-	if err != nil {
-		log.Println(err)
-		panic(err)
-	}
-
-	// Get the id of the newly created dono
-	id, err := result.LastInsertId()
-	if err != nil {
-		log.Println(err)
-		panic(err)
-	}
-
-	return id
-}
-
-func clearEncryptedIP(dono *utils.Dono) {
-	dono.EncryptedIP = ""
-}
-
-func encryptIP(ip string) string {
-	hashedIP, _ := bcrypt.GenerateFromPassword([]byte(ip), bcrypt.MinCost)
-	return string(hashedIP)
-}
-
-func getUnfulfilledDonoIPs() ([]string, error) {
-	ips := []string{}
-
-	db, err := sql.Open("sqlite3", "users.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(`SELECT ip FROM donos WHERE fulfilled = false`)
-	if err != nil {
-		return ips, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var ip string
-		err := rows.Scan(&ip)
-		if err != nil {
-			return ips, err
-		}
-		ips = append(ips, ip)
-	}
-
-	err = rows.Err()
-	if err != nil {
-		return ips, err
-	}
-
-	return ips, nil
-}
-
-func updatePendingDonos() {
-
-	// Open a new database connection
-	db, err := sql.Open("sqlite3", "users.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	// Retrieve all unfulfilled donos from the database
-	rows, err := db.Query(`SELECT * FROM donos WHERE fulfilled = false`)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var dono utils.Dono
-		var tmpAmountToSend sql.NullString
-		var tmpAmountSent sql.NullString
-		var tmpUSDAmount sql.NullFloat64
-		var tmpMediaURL sql.NullString
-
-		err := rows.Scan(&dono.ID, &dono.UserID, &dono.Address, &dono.Name, &dono.Message, &tmpAmountToSend, &tmpAmountSent, &dono.CurrencyType, &dono.AnonDono, &dono.Fulfilled, &dono.EncryptedIP, &dono.CreatedAt, &dono.UpdatedAt, &tmpUSDAmount, &tmpMediaURL)
-		if err != nil {
-			panic(err)
-		}
-
-		if tmpUSDAmount.Valid {
-			dono.USDAmount = tmpUSDAmount.Float64
-		} else {
-			dono.USDAmount = 0.0
-		}
-
-		if tmpAmountToSend.Valid {
-			dono.AmountToSend = tmpAmountToSend.String
-		} else {
-			dono.AmountToSend = "0.0"
-		}
-
-		if tmpAmountSent.Valid {
-			dono.AmountSent = tmpAmountSent.String
-		} else {
-			dono.AmountSent = "0.0"
-		}
-
-		if tmpMediaURL.Valid {
-			dono.MediaURL = tmpMediaURL.String
-		} else {
-			dono.MediaURL = ""
-		}
-
-		addToDonosMap(dono)
-	}
-}
-
-func addToDonosMap(dono utils.Dono) {
-	_, ok := donosMap[dono.ID]
-	if !ok {
-		donosMap[dono.ID] = dono
-	}
-}
-
-func updateDonoInMap(updatedDono utils.Dono) {
-	if _, ok := donosMap[updatedDono.ID]; ok {
-		// The dono exists in the map, update it
-		donosMap[updatedDono.ID] = updatedDono
-	} else {
-		// The dono does not exist in the map, handle the error or do nothing
-	}
-}
-
-func printDonoInfo(dono utils.Dono, secondsElapsedSinceLastCheck, secondsNeededToCheck float64) {
-	log.Println("Dono ID:", dono.ID, "Address:", dono.Address, "Name:", dono.Name, "To User:", dono.UserID)
-	log.Println("Message:", dono.Message)
-	fmt.Println(dono.CurrencyType, "Needed:", dono.AmountToSend, "Recieved:", dono.AmountSent)
-
-	log.Println("Time since check:", fmt.Sprintf("%.2f", secondsElapsedSinceLastCheck), "Needed:", fmt.Sprintf("%.2f", secondsNeededToCheck))
-
-}
-
-func printTransferInfo(t utils.Transfer) {
-	fmt.Printf("Block Number: %v\nUnique ID: %v\nHash: %v\nFrom: %v\nTo: %v\nValue: %v\nERC721 Token ID: %v\nERC1155 Metadata: %v\nToken ID: %v\nAsset: %v\nCategory: %v\n",
-		t.BlockNum,
-		t.UniqueId,
-		t.Hash,
-		t.From,
-		t.To,
-		t.Value,
-		t.Erc721TokenId,
-		t.Erc1155Metadata,
-		t.TokenId,
-		t.Asset,
-		t.Category)
-}
-
-func checkUnfulfilledDonos() []utils.Dono {
-	ips, _ := getUnfulfilledDonoIPs() // get ips
-
-	updatePendingDonos()
-
-	var fulfilledDonos []utils.Dono
-
-	eth_addresses := returnETHAddresses()
-	for _, eth_address := range eth_addresses {
-		log.Println("Getting ETH txs for:", eth_address)
-	}
-
-	tempMap := make(map[string]bool)
-	for _, eth_address := range eth_addresses {
-		log.Println("Getting ETH txs for:", eth_address)
-		transactions, newTX, _ := utils.GetEth(eth_address)
-		if newTX {
-			for _, tx := range transactions {
-				if _, exists := tempMap[tx.Hash]; !exists {
-					eth_transactions = append(eth_transactions, tx)
-					tempMap[tx.Hash] = true
-				}
-			}
-			time.Sleep(2 * time.Second)
-		}
-
-	}
-
-	for _, dono := range donosMap {
-		// Check if the dono has exceeded the killDono time
-		if !dono.Fulfilled {
-			timeElapsedFromDonoCreation := time.Since(dono.CreatedAt)
-			if timeElapsedFromDonoCreation > killDono || dono.Address == " " || dono.AmountToSend == "0.0" {
-				dono.Fulfilled = true
-				if dono.Address == " " {
-					log.Println("No dono address, killed (marked as fulfilled) and won't be checked again.")
-				} else {
-					log.Println("Dono too old, killed (marked as fulfilled) and won't be checked again.")
-				}
-				updateDonoInMap(dono)
-				continue
-			}
-		}
-
-		if dono.CurrencyType != "XMR" && dono.CurrencyType != "SOL" {
-			// Check if amount matches a completed dono amount
-			for _, transaction := range eth_transactions {
-				tN := utils.GetTransactionToken(transaction)
-				if tN == dono.CurrencyType {
-					valueStr := fmt.Sprintf("%.18f", transaction.Value)
-					valueToCheck, _ := utils.StandardizeString(dono.AmountToSend)
-					log.Println("TX checked:", tN)
-					log.Println("Needed:", valueToCheck)
-					log.Println("Got   :", valueStr)
-					if valueStr == valueToCheck {
-						log.Println("Matching TX!")
-						dono.AmountSent = valueStr
-						addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
-						dono.Fulfilled = true
-						dono.UpdatedAt = time.Now().UTC()
-						fulfilledDonos = append(fulfilledDonos, dono)
-						updateDonoInMap(dono)
-						break
-					}
-				}
-			}
-
-			valueToCheck, _ := utils.ConvertStringTo18DecimalPlaces(dono.AmountToSend)
-			dono.UpdatedAt = time.Now().UTC()
-			fmt.Println(valueToCheck, dono.CurrencyType, "Dono incomplete.")
-			updateDonoInMap(dono)
-			continue
-		}
-
-		// Check if the dono needs to be skipped based on exponential backoff
-		secondsElapsedSinceLastCheck := time.Since(dono.UpdatedAt).Seconds()
-		dono.UpdatedAt = time.Now().UTC()
-
-		expoAdder := returnIPPenalty(ips, dono.EncryptedIP) + time.Since(dono.CreatedAt).Seconds()/60/60/19
-		secondsNeededToCheck := math.Pow(float64(baseCheckingRate)-0.02, expoAdder)
-
-		if secondsElapsedSinceLastCheck < secondsNeededToCheck {
-			log.Println("Not enough time has passed, skipping.")
-			continue // If not enough time has passed then ignore
-		}
-
-		log.Println("Enough time has passed, checking.")
-
-		if dono.CurrencyType == "XMR" {
-			xmrFl, _ := getXMRBalance(dono.Address, dono.UserID)
-			xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
-			dono.AmountSent = xmrSent
-			xmrNeededStr, _ := utils.StandardizeString(dono.AmountToSend)
-			printDonoInfo(dono, secondsElapsedSinceLastCheck, secondsNeededToCheck)
-			if dono.AmountSent == xmrNeededStr {
-				dono.AmountSent, _ = utils.PruneStringByDecimalPoints(dono.AmountToSend, 5)
-				addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID)
-				dono.Fulfilled = true
-				fulfilledDonos = append(fulfilledDonos, dono)
-				updateDonoInMap(dono)
-				continue
-			}
-			updateDonoInMap(dono)
-		} else if dono.CurrencyType == "SOL" {
-			log.Println("SOLANA DONO AMOUNT NEEDED:", dono.AmountToSend)
-			if utils.CheckTransactionSolana(dono.AmountToSend, dono.Address, 100) {
-				dono.AmountSent, _ = utils.PruneStringByDecimalPoints(dono.AmountToSend, 5)
-				addDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
-				dono.Fulfilled = true
-				fulfilledDonos = append(fulfilledDonos, dono)
-				updateDonoInMap(dono)
-				continue
-			}
-		}
-	}
-	updateDonosInDB()
-	removeFulfilledDonos(fulfilledDonos)
-	return fulfilledDonos
-}
-
-func removeFulfilledDonos(donos []utils.Dono) {
-	for _, dono := range donos {
-		if _, ok := donosMap[dono.ID]; ok {
-			delete(donosMap, dono.ID)
-		}
-	}
-}
-
-func returnETHAddresses() []string {
-	// Use a map to keep track of which addresses have already been added
-	addressMap := make(map[string]bool)
-	addresses := []string{}
-
-	for _, dono := range donosMap {
-		if dono.CurrencyType != "XMR" && dono.CurrencyType != "SOL" {
-			// Check if the address has already been added, and if not, add it to the slice and map
-			if _, ok := addressMap[dono.Address]; !ok {
-				addressMap[dono.Address] = true
-				addresses = append(addresses, dono.Address)
-			}
-		}
-	}
-
-	return addresses
-}
-
-func updateDonosInDB() {
-	// Open a new database connection
-	db, err := sql.Open("sqlite3", "users.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	// Loop through the donosMap and update the database with any changes
-	for _, dono := range donosMap {
-		if dono.Fulfilled && dono.AmountSent != "0.0" {
-			log.Println("DONO COMPLETED: ", dono.AmountSent, dono.CurrencyType)
-		}
-		_, err = db.Exec("UPDATE donos SET user_id=?, dono_address=?, dono_name=?, dono_message=?, amount_to_send=?, amount_sent=?, currency_type=?, anon_dono=?, fulfilled=?, encrypted_ip=?, created_at=?, updated_at=?, usd_amount=?, media_url=? WHERE dono_id=?", dono.UserID, dono.Address, dono.Name, dono.Message, dono.AmountToSend, dono.AmountSent, dono.CurrencyType, dono.AnonDono, dono.Fulfilled, dono.EncryptedIP, dono.CreatedAt, dono.UpdatedAt, dono.USDAmount, dono.MediaURL, dono.ID)
-		if err != nil {
-			log.Printf("Error updating Dono with ID %d in the database: %v\n", dono.ID, err)
-		} else {
-			delete(donosMap, dono.ID)
-		}
-	}
-}
-
-func getXMRBalance(checkID string, userID int) (float64, error) {
-
-	portID := getPortID(xmrWallets, userID)
-
-	found := true
-	if portID == -100 {
-		found = false
-	}
-
-	if found {
-		fmt.Println("Port ID for user", userID, "is", portID)
-	} else {
-		fmt.Println("Port ID not found for user", userID)
-	}
-
-	url := "http://localhost:" + strconv.Itoa(portID) + "/json_rpc"
-
-	payload := struct {
-		Jsonrpc string `json:"jsonrpc"`
-		Id      int    `json:"id"`
-		Method  string `json:"method"`
-		Params  struct {
-			PaymentID string `json:"payment_id"`
-		} `json:"params"`
-	}{
-		Jsonrpc: "2.0",
-		Id:      0,
-		Method:  "get_payments",
-		Params: struct {
-			PaymentID string `json:"payment_id"`
-		}{
-			PaymentID: checkID,
-		},
-	}
-
-	reqBody, err := json.Marshal(payload)
-	if err != nil {
-		return 0.0, err
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return 0.0, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0.0, err
-	}
-	defer resp.Body.Close()
-
-	var result map[string]interface{}
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return 0.0, err
-	}
-
-	fmt.Println(result)
-
-	resultMap, ok := result["result"].(map[string]interface{})
-	if !ok {
-		return 0.0, fmt.Errorf("result key not found in response")
-	}
-
-	payments, ok := resultMap["payments"].([]interface{})
-	if !ok {
-		return 0.0, fmt.Errorf("payments key not found in result map")
-	}
-
-	if len(payments) == 0 {
-		return 0.0, fmt.Errorf("no payments found for payment ID %s", checkID)
-	}
-
-	amount := payments[0].(map[string]interface{})["amount"].(float64)
-
-	return amount / math.Pow(10, 12), nil
-}
-
-func runDatabaseMigrations(db *sql.DB) error {
-	tables := []string{"queue", "donos"}
-	for _, table := range tables {
-		err := addColumnIfNotExist(db, table, "usd_amount", "FLOAT")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, table, "media_url", "TEXT")
-		if err != nil {
-			return err
-		}
-	}
-	tables = []string{"users"}
-	for _, table := range tables {
-		err := addColumnIfNotExist(db, table, "links", "TEXT")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, table, "dono_gif", "TEXT")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, table, "default_crypto", "TEXT")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, table, "dono_sound", "TEXT")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, table, "alert_url", "TEXT")
-		if err != nil {
-			return err
-		}
-
-		err = removeColumnIfExist(db, table, "progressbar_url")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, "users", "date_enabled", "DATETIME")
-		if err != nil {
-			return err
-		}
-
-		err = addColumnIfNotExist(db, "users", "wallet_uploaded", "BOOLEAN")
-		if err != nil {
-			return err
-		}
-	}
-
-	tables = []string{"queue"}
-	for _, table := range tables {
-		err := addColumnIfNotExist(db, table, "user_id", "TEXT")
-		if err != nil {
-			return err
-		}
-	}
-
-	err := updateColumnAlertURLIfNull(db, "users", "alert_url")
-	if err != nil {
-		return err
-	}
-
-	err = updateColumnWalletUploadedIfNull(db, "users", "wallet_uploaded")
-	if err != nil {
-		return err
-	}
-
-	err = updateColumnDateEnabledIfNull(db, "users", "date_enabled")
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func updateColumnWalletUploadedIfNull(db *sql.DB, tableName, columnName string) error {
-	if checkDatabaseColumnExist(db, tableName, columnName) {
-		_, err := db.Exec(`UPDATE `+tableName+` SET `+columnName+` = ? WHERE `+columnName+` IS NULL`, "0")
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func updateColumnDateEnabledIfNull(db *sql.DB, tableName, columnName string) error {
-	if checkDatabaseColumnExist(db, tableName, columnName) {
-		_, err := db.Exec(`UPDATE `+tableName+` SET `+columnName+` = ? WHERE `+columnName+` IS NULL`, time.Now().UTC())
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func updateColumnAlertURLIfNull(db *sql.DB, tableName, columnName string) error {
-	if checkDatabaseColumnExist(db, tableName, columnName) {
-		value := utils.GenerateUniqueURL()
-		_, err := db.Exec(`UPDATE `+tableName+` SET `+columnName+` = ? WHERE `+columnName+` IS NULL`, value)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func removeColumnIfExist(db *sql.DB, tableName, columnName string) error {
-	if checkDatabaseColumnExist(db, tableName, columnName) {
-		_, err := db.Exec(`ALTER TABLE ` + tableName + ` DROP COLUMN ` + columnName)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func addColumnIfNotExist(db *sql.DB, tableName, columnName, columnType string) error {
-	if !checkDatabaseColumnExist(db, tableName, columnName) {
-		_, err := db.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN ` + columnName + ` ` + columnType)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func checkDatabaseColumnExist(db *sql.DB, dbTable string, dbColumn string) bool {
-	// check if column already exists
-	var count int
-	err := db.QueryRow("SELECT count(*) FROM pragma_table_info('" + dbTable + "') WHERE name='" + dbColumn + "'").Scan(&count)
-	if err != nil {
-		return false
-	}
-
-	// column doesn't exist
-	if count == 0 {
-		return false
-	}
-	return true // column does exist
-}
-
-func createDatabaseIfNotExists(db *sql.DB) error {
-	// create the tables if they don't exist
-	_, err := db.Exec(`
-        CREATE TABLE IF NOT EXISTS donos (
-            dono_id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            dono_address TEXT,
-            dono_name TEXT,
-            dono_message TEXT,
-            amount_to_send TEXT,            
-            amount_sent TEXT,
-            currency_type TEXT,
-            anon_dono BOOL,
-            fulfilled BOOL,
-            encrypted_ip TEXT,
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    `)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS billing (
-        	billing_id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            amount_this_month FLOAT,
-            amount_total FLOAT,
-            enabled BOOL,
-            need_to_pay BOOL,
-            eth_amount TEXT,
-            xmr_amount TEXT,
-            xmr_pay_id TEXT,
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    `)
-
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS addresses (
-            value TEXT NOT NULL,
-            active BOOL NOT NULL
-        )
-    `)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS queue (
-            name TEXT,
-            message TEXT,
-            amount FLOAT,
-            currency TEXT
-        )
-    `)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            HashedPassword BLOB,
-            eth_address TEXT,
-            sol_address TEXT,
-            hex_address TEXT,
-            xmr_wallet_password TEXT,
-            min_donation_threshold FLOAT,
-            min_media_threshold FLOAT,
-            media_enabled BOOL,
-            created_at DATETIME,
-            modified_at DATETIME,
-            links TEXT,
-            dono_gif TEXT,
-            dono_sound TEXT,
-            alert_url TEXT,
-            date_enabled DATETIME,
-            wallet_uploaded BOOL,
-            cryptos_enabled TEXT
-
-        )
-    `)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS pendingusers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            HashedPassword BLOB,
-            XMRPayID TEXT,
-            XMRNeeded TEXT,
-            ETHNeeded TEXT
-        )
-    `)
-
-	if err != nil {
-		return err
-	}
-
-	err = createObsTable(db)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	createAdminUser()
-	createNewUser("paul", "hunter")
-
-	return nil
-}
-
-func createNewInviteCode(value string, active bool) error {
-	inviteData := `
-        INSERT INTO invites (
-            value,
-            active
-        ) VALUES (?, ?);`
-	_, err := db.Exec(inviteData, value, active)
-	if err != nil {
-		return err
-	} else {
-		return nil
-	}
-}
-
-func createNewOBS(db *sql.DB, userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string) {
-	pbData := utils.ProgressbarData{
-		Message: message,
-		Needed:  needed,
-		Sent:    sent,
-		Refresh: refresh,
-	}
-	err := insertObsData(db, userID, gifFile, soundFile, ttsVoice, pbData)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-}
-
-func createAdminUser() {
-
-	createNewUser("admin", "hunter123")
-}
-
-func createObsTable(db *sql.DB) error {
-	obsTable := `
-        CREATE TABLE IF NOT EXISTS obs (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            gif_name TEXT,
-            mp3_name TEXT,
-            tts_voice TEXT,
-            message TEXT,
-            needed FLOAT,
-            sent FLOAT
-        );`
-	_, err := db.Exec(obsTable)
-	return err
-}
-
-func insertObsData(db *sql.DB, userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error {
-	obsData := `
-        INSERT INTO obs (
-            user_id,
-            gif_name,
-            mp3_name,
-            tts_voice,
-            message,
-            needed,
-            sent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?);`
-	_, err := db.Exec(obsData, userId, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent)
-	return err
-}
-
-func checkObsData(db *sql.DB) (bool, error) {
-	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM obs").Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count == 0, nil
-}
-
-func updateObsData(db *sql.DB, userID int, gifName string, mp3Name string, ttsVoice string, pbData utils.ProgressbarData) error {
-
-	updateObsData := `
-        UPDATE obs
-        SET user_id = ?,
-            gif_name = ?,
-            mp3_name = ?,
-            tts_voice = ?,
-            message = ?,
-            needed = ?,
-            sent = ?
-        WHERE id = ?;`
-	_, err := db.Exec(updateObsData, userID, gifName, mp3Name, ttsVoice, pbData.Message, pbData.Needed, pbData.Sent, userID)
-	return err
-}
-
-func getObsData(db *sql.DB, userId int) utils.OBSDataStruct {
-	var tempObsData utils.OBSDataStruct
-	err := db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id = ?", userId).
-		Scan(&tempObsData.FilenameGIF, &tempObsData.FilenameMP3, &tempObsData.Message, &tempObsData.Needed, &tempObsData.Sent)
-	if err != nil {
-		log.Println("Error:", err)
-	}
-
-	return tempObsData
-}
-
-func createNewUser(username, password string) error {
-	log.Println("running createNewUser")
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-	// create admin user if not exists
-	user := getNewUser(username, hashedPassword)
-	userID := createUser(user)
-	if userID != 0 {
-		createNewOBS(db, userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
-		log.Println("createUser() succeeded, so OBS row was created.")
-	} else {
-		log.Println("createUser() didn't succeed, so OBS row wasn't created.")
-	}
-
-	log.Println("finished createNewUser")
-	return nil
-}
-
-func createUser(user utils.User) int {
-	log.Println("running CreateUser")
-	// Insert the user's data into the database
-
-	ce := utils.CryptosEnabled{
-		XMR:   false,
-		SOL:   true,
-		ETH:   true,
-		PAINT: true,
-		HEX:   true,
-		MATIC: true,
-		BUSD:  true,
-		SHIB:  true,
-		PNK:   true,
-	}
-
-	ce_ := cryptosStructToJSONString(ce)
-
-	_, err := db.Exec(`
-        INSERT INTO users (
-            username,
-            HashedPassword,
-            eth_address,
-            sol_address,
-            hex_address,
-            xmr_wallet_password,
-            min_donation_threshold,
-            min_media_threshold,
-            media_enabled,
-            created_at,
-            modified_at,
-            links,
-            dono_gif,
-            dono_sound,
-            alert_url,
-            date_enabled,
-            wallet_uploaded,
-            cryptos_enabled,
-            default_crypto
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, user.Username, user.HashedPassword, user.EthAddress, user.SolAddress, user.HexcoinAddress, "", user.MinDono, user.MinMediaDono, user.MediaEnabled, time.Now().UTC(), time.Now(), "", user.DonoGIF, user.DonoSound, user.AlertURL, user.DateEnabled, 0, ce_, user.DefaultCrypto)
-
-	if err != nil {
-		log.Println(err)
-		return 0
-	}
-
-	// Get the ID of the newly created user
-	row := db.QueryRow(`SELECT last_insert_rowid()`)
-	var userID int
-	err = row.Scan(&userID)
-	if err != nil {
-		log.Println(err)
-		return 0
-	}
-
-	billing := utils.BillingData{
-		UserID:          userID,
-		AmountThisMonth: 0.00,
-		AmountTotal:     0.00,
-		Enabled:         true,
-		NeedToPay:       false,
-		ETHAmount:       "",
-		XMRAmount:       "",
-		XMRPayID:        "",
-		CreatedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}
-
-	_, err = db.Exec(`
-        INSERT INTO billing (
-            user_id,
-            amount_this_month,
-            amount_total,
-            enabled,
-            need_to_pay,
-            eth_amount,
-            xmr_amount,
-            xmr_pay_id,
-            created_at,
-            updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, billing.UserID, billing.AmountThisMonth, billing.AmountTotal, billing.Enabled, billing.NeedToPay, "", "", "", billing.CreatedAt, billing.CreatedAt)
-
-	user.BillingData = billing
-	globalUsers[userID] = user
-
-	log.Printf("BillingData.Enabled: %v", billing.Enabled)
-
-	// Create a directory for the user based on their ID
-	userDir := fmt.Sprintf("users/%d", userID)
-	err = os.MkdirAll(userDir, os.ModePerm)
-	if err != nil {
-		log.Println(err)
-	}
-
-	// Create "gifs" and "sounds" subfolders inside the user's directory
-	gifsDir := fmt.Sprintf("%s/gifs", userDir)
-	err = os.MkdirAll(gifsDir, os.ModePerm)
-	if err != nil {
-		log.Println(err)
-	}
-
-	soundsDir := fmt.Sprintf("%s/sounds", userDir)
-	err = os.MkdirAll(soundsDir, os.ModePerm)
-	if err != nil {
-		log.Println(err)
-	}
-
-	moneroDir := fmt.Sprintf("%s/monero", userDir)
-	err = os.MkdirAll(moneroDir, os.ModePerm)
-	if err != nil {
-		log.Println(err)
-	}
-
-	minDonoValue = float64(user.MinDono)
-	log.Println("finished createNewUser")
-
-	_, err = getAllUsers()
-	if err != nil {
-		log.Fatalf("createUser() getAllUsers() error: %v", err)
-	}
-
-	return userID
-}
-
-// update an existing code
-func updateInviteCode(code utils.InviteCode) error {
-
-	inviteCodeMap[code.Value] = code
-	statement := `
-		UPDATE invites
-		SET value=?, active=?
-		WHERE value=?
-	`
-	_, err := db.Exec(statement, code.Value, code.Active, code.Value)
-	if err != nil {
-		log.Fatalf("failed, err: %v", err)
-	}
-	return err
-}
-
-// update an existing user
-func updateUser(user utils.User) error {
-	globalUsers[user.UserID] = user
-	statement := `
-		UPDATE users
-		SET Username=?, HashedPassword=?, eth_address=?, sol_address=?, hex_address=?,
-			xmr_wallet_password=?, min_donation_threshold=?, min_media_threshold=?, media_enabled=?, modified_at=?, links=?, dono_gif=?, dono_sound=?, alert_url=?, date_enabled=?, wallet_uploaded=?, cryptos_enabled=?, default_crypto=?
-		WHERE id=?
-	`
-	_, err := db.Exec(statement, user.Username, user.HashedPassword, user.EthAddress,
-		user.SolAddress, user.HexcoinAddress, user.XMRWalletPassword, user.MinDono, user.MinMediaDono,
-		user.MediaEnabled, time.Now().UTC(), user.Links, user.DonoGIF, user.DonoSound, user.AlertURL, user.DateEnabled, user.WalletUploaded, cryptosStructToJSONString(user.CryptosEnabled), user.DefaultCrypto, user.UserID)
-	if err != nil {
-		log.Fatalf("failed, err: %v", err)
-	}
-
-	statement = `
-		UPDATE billing
-		SET user_id=?, amount_this_month=?, amount_total=?, enabled=?, need_to_pay=?,
-			eth_amount=?, xmr_amount=?, xmr_pay_id=?, created_at=?, updated_at=?
-		WHERE billing_id=?
-	`
-	_, err = db.Exec(statement, user.UserID, user.BillingData.AmountThisMonth, user.BillingData.AmountTotal, user.BillingData.Enabled,
-		user.BillingData.NeedToPay, user.BillingData.ETHAmount, user.BillingData.XMRAmount, user.BillingData.XMRPayID, user.BillingData.CreatedAt,
-		user.BillingData.UpdatedAt, user.BillingData.UserID)
-	if err != nil {
-		log.Fatalf("failed, err: %v", err)
-	}
-
-	solWallets[user.UserID] = utils.SolWallet{
-		Address: user.SolAddress,
-		Amount:  0.00,
-	}
-
-	utils.SetSolWallets(solWallets)
-	return err
-}
-
-func getUserByAlertURL(AlertURL string) (utils.User, error) {
-	var user utils.User
-	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT * FROM users WHERE alert_url=?", AlertURL)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-	if err != nil {
-		return utils.User{}, err
-	}
-	user.Links = links.String
-	if !links.Valid {
-		user.Links = ""
-	}
-	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoGIF.Valid {           // check if the "dono_gif" column is null
-		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
-	}
-	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoSound.Valid {             // check if the "dono_gif" column is null
-		user.DonoSound = "default.mp3" // set the user's "DonoSound"
-	}
-
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
-
-	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !alertURL.Valid {            // check if the "dono_gif" column is null
-		user.AlertURL = utils.GenerateUniqueURL() // set the user's "DonoSound"
-	}
-
-	ce := utils.CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
-
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
-
-	return user, nil
-}
-
-func getOBSDataByAlertURL(AlertURL string) (utils.OBSDataStruct, error) {
-	user, err := getUserByAlertURL(AlertURL)
-	if err != nil {
-		log.Println("Couldn't get user,", err)
-	}
-	var obsData utils.OBSDataStruct
-	//var alertURL sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", user.UserID)
-
-	err = row.Scan(&obsData.FilenameGIF, &obsData.FilenameMP3, &obsData.Message, &obsData.Needed, &obsData.Sent)
-	if err != nil {
-		log.Println("Couldn't get obsData,", err)
-		return obsData, err
-	}
-
-	return obsData, nil
-
-}
-
-func getOBSDataByUserID(userID int) (utils.OBSDataStruct, error) {
-	var obsData utils.OBSDataStruct
-	//var alertURL sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", userID)
-
-	err := row.Scan(&obsData.FilenameGIF, &obsData.FilenameMP3, &obsData.Message, &obsData.Needed, &obsData.Sent)
-	if err != nil {
-		log.Println("Couldn't get obsData,", err)
-		return obsData, err
-	}
-
-	return obsData, nil
-
-}
-
-// get a user by their session token
-func getUserBySessionCached(sessionToken string) (utils.User, bool) {
-	userID, ok := userSessions[sessionToken]
-	if !ok {
-		log.Println("session token not found")
-		return globalUsers[0], false
-	}
-	for _, user := range globalUsers {
-		if user.UserID == userID {
-			return user, true
-		}
-	}
-	return globalUsers[0], false
-}
-
-func getUserByUsernameCached(username string) (utils.User, bool) {
-	for _, user := range globalUsers {
-		if user.Username == username {
-			return user, true
-		}
-	}
-	return globalUsers[0], false
-
-}
-
-// get a user by their username
-func getUserByUsername(username string) (utils.User, error) {
-	var user utils.User
-	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT * FROM users WHERE Username=?", username)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-	if err != nil {
-		return utils.User{}, err
-	}
-	user.Links = links.String
-	if !links.Valid {
-		user.Links = ""
-	}
-	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoGIF.Valid {           // check if the "dono_gif" column is null
-		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
-	}
-	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoSound.Valid {             // check if the "dono_gif" column is null
-		user.DonoSound = "default.mp3" // set the user's "DonoSound"
-	}
-
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
-
-	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !alertURL.Valid {            // check if the "dono_gif" column is null
-		user.AlertURL = utils.GenerateUniqueURL() // set the user's "DonoSound"
-	}
-
-	ce := utils.CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
-
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
-
-	user = setUserMinDonos(user)
-
-	return user, nil
-
-}
-
-// check a user by their ID
-func checkUserByID(id int) bool {
-	var user utils.User
-	var links, donoGIF, donoSound, defaultCrypto, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT * FROM users WHERE id=?", id)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-
-	ce := utils.CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
-
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
-
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
-
-	if err == sql.ErrNoRows {
-		log.Println("checkUserByID(", id, "): User doesn't exist")
-		return false // user doesn't exist
-	} else if err != nil {
-		log.Println("checkUserByID(", id, ") Error:", err)
-		return false
-	}
-	return true // user exists
-
-}
-
-func printUserColumns() error {
-	rows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'users';`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	var column string
-	for rows.Next() {
-		err = rows.Scan(&column)
-		if err != nil {
-			return err
-		}
-		fmt.Println(column)
-	}
-	return rows.Err()
-}
-
-// check a user by their username and return a bool and the id
-func checkUserByUsername(username string) (bool, int) {
-	printUserColumns()
-	var user utils.User
-	var links, donoGIF, donoSound, defaultCrypto, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT * FROM users WHERE Username=?", username)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-
-	ce := utils.CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
-
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
-
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
-
-	if err == sql.ErrNoRows {
-		log.Println("checkUserByUsername(", username, "): User doesn't exist")
-		return false, 0 // user doesn't exist
-	} else if err != nil {
-		log.Println("checkUserByUsername(", username, ") Error:", err)
-		return false, 0
-	}
-	return true, user.UserID // user exists, return true and the user's ID
-}
-
-// get a user by their session token
-func getUserBySession(sessionToken string) (utils.User, error) {
-	userID, ok := userSessions[sessionToken]
-	if !ok {
-		return utils.User{}, fmt.Errorf("session token not found")
-	}
-	var user utils.User
-	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := db.QueryRow("SELECT * FROM users WHERE id=?", userID)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-	if err != nil {
-		return utils.User{}, err
-	}
-	user.Links = links.String
-	if !links.Valid {
-		user.Links = ""
-	}
-	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoGIF.Valid {           // check if the "dono_gif" column is null
-		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
-	}
-	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoSound.Valid {             // check if the "dono_gif" column is null
-		user.DonoSound = "default.mp3" // set the user's "DonoSound"
-	}
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
-
-	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !alertURL.Valid {            // check if the "dono_gif" column is null
-		user.AlertURL = utils.GenerateUniqueURL() // set the user's "DonoSound"
-	}
-
-	ce := utils.CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
-
-	user.CryptosEnabled = cryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
-
-	return user, nil
 }
 
 // verify that the entered password matches the stored hashed password for a user
@@ -2949,13 +747,13 @@ func verifyPassword(user utils.User, password string) bool {
 	return err == nil
 }
 
-func loginHandler(w http.ResponseWriter, r *http.Request) {
+func loginHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	if r.Method == "POST" {
 		username := r.FormValue("username")
 		username = strings.ToLower(username)
 		password := r.FormValue("password")
 
-		user, valid := getUserByUsernameCached(username)
+		user, valid := ur.GetUserByUsernameCached(username)
 
 		if !valid {
 			log.Println("Can't find username")
@@ -2964,7 +762,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 		}
 
-		if user.UserID == 0 || !verifyPassword(user, password) {
+		if user.UserID == 0 || !ur.VerifyPassword(user, password) {
 			http.Redirect(w, r, "/incorrect_login", http.StatusFound)
 			return
 		}
@@ -3597,7 +1395,7 @@ func alertOBSHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func progressbarOBSHandler(w http.ResponseWriter, r *http.Request) {
+func progressbarOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	value := r.URL.Query().Get("value")
 	obsData, err := getOBSDataByAlertURL(value)
 
@@ -3644,7 +1442,7 @@ func cryptosJsonStringToStruct(jsonStr string) utils.CryptosEnabled {
 	return s
 }
 
-func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request) {
+func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository, mr *models.MoneroRepository) {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
 		fmt.Println(err)
@@ -3652,7 +1450,7 @@ func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid || r.Method == http.MethodPost {
 		http.Redirect(w, r, "/user", http.StatusSeeOther)
 		return
@@ -3661,7 +1459,7 @@ func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		moneroWalletString := "monero wallet not uploaded"
 		moneroWalletKeysString := "monero wallet not key uploaded"
 
-		if checkUserMoneroWallet(userPath) && !CheckMoneroPort(user.UserID) {
+		if checkUserMoneroWallet(userPath) && !mr.CheckMoneroPort(user.UserID) {
 			moneroWalletString = "monero wallet uploaded but not running correctly. Please ensure you have created a view only wallet with no password."
 			moneroWalletKeysString = "monero wallet key uploaded but not running correctly. Please ensure you have created a view only wallet with no password."
 		}
@@ -3819,7 +1617,7 @@ func getIPAddress(r *http.Request) string {
 	return ip
 }
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
+func indexHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 
 	// Ignore requests for the favicon
 	if r.URL.Path == "/favicon.ico" {
@@ -3829,9 +1627,9 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Path[1:]
 
 	username = strings.ToLower(username)
-	user_, valid := getUserByUsernameCached(username)
+	user_, valid := ur.GetUserByUsernameCached(username)
 	// Calculate all minimum donations
-	user := globalUsers[user_.UserID]
+	user := ur.Users[user_.UserID]
 	log.Println("user ID in indexHandler =", user.UserID)
 	if valid && username != "admin" {
 		if user.Links == "" {
@@ -3907,8 +1705,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func checkDonoQueue(db *sql.DB, userID int) (bool, error) {
-
+func checkDonoQueue(userID int, ur *models.UserRepository) (bool, error) {
 	// Fetch oldest entry from queue table where user_id matches userID
 	row := db.QueryRow("SELECT name, message, amount, currency, media_url, usd_amount FROM queue WHERE user_id = ? ORDER BY rowid LIMIT 1", userID)
 
@@ -3940,7 +1737,7 @@ func checkDonoQueue(db *sql.DB, userID int) (bool, error) {
 	a.DisplayToggle = "display: block;"
 
 	// Remove fetched entry from queue table
-	_, err = db.Exec("DELETE FROM queue WHERE name = ? AND message = ? AND amount = ? AND currency = ?", name, message, amount, currency)
+	_, err = ur.Db.Exec("DELETE FROM queue WHERE name = ? AND message = ? AND amount = ? AND currency = ?", name, message, amount, currency)
 	if err != nil {
 		return false, err
 	}
@@ -3979,27 +1776,15 @@ func returnIPPenalty(ips []string, currentDonoIP string) float64 {
 	return expoAdder
 }
 
-func checkValidInviteCode(ic string) bool {
-	if _, ok := inviteCodeMap[ic]; ok {
-		if inviteCodeMap[ic].Active {
-			return true
-		} else {
-			return false
-		}
-	} else {
-		return false
-	}
-}
-
-func newAccountHandler(w http.ResponseWriter, r *http.Request) {
+func newAccountHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository, ir *models.InviteRepository, dr *models.DonoRepository, mr *models.MoneroRepository) {
 	username := r.FormValue("username")
 	invitecode := r.FormValue("invitecode")
 
 	username = utils.SanitizeStringLetters(username)
 
 	password := r.FormValue("password")
-	isAdmin := checkLoggedInAdmin(w, r)
-	_, validUser := getUserByUsernameCached(username)
+	isAdmin := checkLoggedInAdmin(w, r, ur)
+	_, validUser := ur.GetUserByUsernameCached(username)
 	if r.Method != http.MethodPost || (validUser && !isAdmin) {
 		// Redirect to the payment page if the request is not a POST request
 		http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -4007,14 +1792,14 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !PublicRegistrationsEnabled {
-		if isAdmin || checkValidInviteCode(invitecode) {
-			if !checkUsernamePendingOrCreated(username) {
-				err_ := createNewUser(username, password)
+		if isAdmin || ir.CheckValidInviteCode(invitecode) {
+			if !checkUsernamePendingOrCreated(username, ur) {
+				err_ := ur.CreateNew(username, password)
 				if err_ != nil {
 					log.Println(err_)
 				} else {
-					inviteCodeMap[invitecode] = utils.InviteCode{Value: invitecode, Active: false}
-					updateInviteCode(inviteCodeMap[invitecode])
+					ir.InviteCodeMap[invitecode] = models.InviteCode{Value: invitecode, Active: false}
+					ir.UpdateInviteCode(ir.InviteCodeMap[invitecode])
 				}
 				http.Redirect(w, r, "/user", http.StatusSeeOther)
 				return
@@ -4027,8 +1812,8 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if !checkUsernamePendingOrCreated(username) {
-			pendingUser, err := createNewPendingUser(username, password)
+		if !checkUsernamePendingOrCreated(username, ur) {
+			pendingUser, err := models.CreateNewPendingUser(username, password, dr, ur, mr)
 			if err != nil {
 				log.Println(err)
 			}
@@ -4068,7 +1853,7 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func checkUsernamePendingOrCreated(username_ string) bool {
+func checkUsernamePendingOrCreated(username_ string, ur *models.UserRepository) bool {
 	username := strings.ToLower(username_)
 	for _, route_ := range routes_ {
 		if utils.SanitizeStringLetters(route_.Path) == username {
@@ -4076,14 +1861,14 @@ func checkUsernamePendingOrCreated(username_ string) bool {
 		}
 	}
 
-	for _, user := range pendingGlobalUsers {
+	for _, user := range ur.PendingUsers {
 		if user.Username == username {
 			return true
 		}
 
 	}
 
-	for _, user := range globalUsers {
+	for _, user := range ur.Users {
 		if user.Username == username {
 			return true
 		}
@@ -4159,177 +1944,6 @@ func getETHAmountInUSD(usdAmount float64) string {
 	ethStr := utils.FuzzDono(ethPrice, "ETH")
 	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
 	return ethStr_
-}
-
-func getNewAccountXMR() (string, string) {
-	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
-	userID := 1
-	portID := getPortID(xmrWallets, userID)
-
-	found := true
-	if portID == -100 {
-		found = false
-	}
-
-	if found {
-		fmt.Println("Port ID for user", userID, "is", portID)
-	} else {
-		fmt.Println("Port ID not found for user", userID)
-	}
-
-	rpcURL_ := "http://127.0.0.1:" + strconv.Itoa(portID) + "/json_rpc"
-
-	req, err := http.NewRequest("POST", rpcURL_, payload)
-	if err != nil {
-		log.Println("ERROR CREATING req:", err)
-		return "", ""
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Println("ERROR SENDING REQUEST:", err)
-		return "", ""
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		log.Println("ERROR: Non-200 response code received:", res.StatusCode)
-		return "", ""
-	}
-
-	resp := &utils.RPCResponse{}
-	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
-		log.Println("ERROR DECODING RESPONSE:", err)
-		return "", ""
-	}
-
-	PayID := html.EscapeString(resp.Result.PaymentID)
-
-	PayAddress := html.EscapeString(resp.Result.IntegratedAddress)
-
-	log.Println("RETURNING XMR PAYID:", PayID)
-	return PayID, PayAddress
-}
-
-func createNewPendingUser(username string, password string) (utils.PendingUser, error) {
-	log.Println("begin createNewPendingUser()")
-	user_, _ := getUserByUsernameCached("admin")
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return utils.PendingUser{}, err
-	}
-	PayID, PayAddress := getNewAccountXMR()
-	user := utils.PendingUser{
-		Username:       username,
-		HashedPassword: hashedPassword,
-		ETHAddress:     user_.EthAddress,
-		XMRAddress:     PayAddress,
-		ETHNeeded:      getNewAccountETHPrice(),
-		XMRNeeded:      getNewAccountXMRPrice(),
-		XMRPayID:       PayID,
-	}
-
-	err = createPendingUser(user)
-	if err != nil {
-		log.Println("createPendingUser:", err)
-		return utils.PendingUser{}, err
-	}
-	// Get the ID of the newly inserted user
-	row := db.QueryRow(`SELECT last_insert_rowid()`)
-	err = row.Scan(&user.ID)
-	if err != nil {
-		return utils.PendingUser{}, err
-	}
-	pendingGlobalUsers[user.ID] = user
-	log.Println("finish createNewPendingUser() without error")
-	return user, nil
-
-}
-
-func createPendingUser(user utils.PendingUser) error {
-	_, err := db.Exec(`
-        INSERT INTO pendingusers (username, HashedPassword, XMRPayID, XMRNeeded, ETHNeeded)
-        VALUES (?, ?, ?, ?, ?)
-    `, user.Username, user.HashedPassword, user.XMRPayID, user.XMRNeeded, user.ETHNeeded)
-	if err != nil {
-		return err
-	}
-
-	// Get the ID of the newly inserted user
-	row := db.QueryRow(`SELECT last_insert_rowid()`)
-	err = row.Scan(&user.ID)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func getNewUser(username string, hashedPassword []byte) utils.User {
-
-	ce := utils.CryptosEnabled{
-		XMR:   false,
-		SOL:   false,
-		ETH:   false,
-		PAINT: false,
-		HEX:   false,
-		MATIC: false,
-		BUSD:  false,
-		SHIB:  false,
-		PNK:   false,
-	}
-
-	user := utils.User{
-		Username:          username,
-		HashedPassword:    hashedPassword,
-		CryptosEnabled:    ce,
-		EthAddress:        "0x5b5856dA280e592e166A1634d353A53224ed409c",
-		SolAddress:        "adWqokePHcAbyF11TgfvvM1eKax3Kxtnn9sZVQh6fXo",
-		HexcoinAddress:    "0x5b5856dA280e592e166A1634d353A53224ed409c",
-		XMRWalletPassword: "",
-		MinDono:           3,
-		MinMediaDono:      5,
-		MediaEnabled:      true,
-		DonoGIF:           "default.gif",
-		DonoSound:         "default.mp3",
-		AlertURL:          utils.GenerateUniqueURL(),
-		WalletUploaded:    false,
-		Links:             "",
-		DateEnabled:       time.Now().UTC(),
-	}
-	return user
-}
-
-func createNewUserFromPending(user_ utils.PendingUser) error {
-	log.Println("running createNewUserFromPending")
-
-	user := getNewUser(user_.Username, user_.HashedPassword)
-	userID := createUser(user)
-	if userID != 0 {
-		createNewOBS(db, userID, "default message", 100.00, 50.00, 5, user.DonoGIF, user.DonoSound, "test_voice")
-		log.Println("createNewUserFromPending() succeeded, so OBS row was created. Deleting pending user from pendingusers table")
-		err := deletePendingUser(user_)
-		if err != nil {
-			return err
-		}
-	} else {
-		log.Println("createNewUserFromPending() didn't succeed, so OBS row wasn't created. Pending user remains in DB")
-	}
-
-	log.Println("finished createNewUserFromPending()")
-
-	return nil
-}
-
-func deletePendingUser(user utils.PendingUser) error {
-	delete(pendingGlobalUsers, user.ID)
-	_, err := db.Exec(`DELETE FROM pendingusers WHERE id = ?`, user.ID)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func paymentHandler(w http.ResponseWriter, r *http.Request) {
@@ -4444,7 +2058,7 @@ func createNewXMRDono(name string, message string, mediaURL string, amountNeeded
 	pending_donos = utils.AppendPendingDono(pending_donos, new_dono)
 }
 
-func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request) {
+func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
 	donationIDStr := r.FormValue("donation_id") // Get the donation ID from the query string
 	donationID, err := strconv.Atoi(donationIDStr)
 	log.Println("User Page Checking DonationID:", donationID)
@@ -4453,7 +2067,7 @@ func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	completed := isDonoFulfilled(donationID)
+	completed := dr.IsDonoFulfilled(donationID)
 	if completed {
 		fmt.Fprintf(w, `true`) // Return the status as a JSON response
 	} else {
@@ -4461,70 +2075,8 @@ func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func isDonoFulfilled(donoID int) bool {
-	// Open a new database connection
-	db, err := sql.Open("sqlite3", "users.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	// Retrieve the dono with the given ID
-	row := db.QueryRow("SELECT fulfilled FROM donos WHERE dono_id = ?", donoID)
-
-	var fulfilled bool
-	err = row.Scan(&fulfilled)
-	if err != nil {
-		panic(err)
-	}
-
-	return fulfilled
-}
-
-func ethToWei(ethStr string) *big.Int {
-	etherValue := big.NewFloat(1000000000000000000)
-	f, err := strconv.ParseFloat(ethStr, 64)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil
-	}
-	number := big.NewFloat(f)
-
-	weiValue := new(big.Int)
-	weiValue, _ = weiValue.SetString(number.Mul(number, etherValue).Text('f', 0), 10)
-
-	return weiValue
-}
-
-func getEthAddressByID(userID int) string {
-	if user, ok := globalUsers[userID]; ok {
-		log.Println("Got userID:", user.UserID, "Returned:", user.EthAddress)
-		return user.EthAddress
-	}
-	log.Println("Got userID:", userID, "No user found")
-	return ""
-}
-
-func getSolAddressByID(userID int) string {
-	if user, ok := globalUsers[userID]; ok {
-		log.Println("Got userID:", user.UserID, "Returned:", user.SolAddress)
-		return user.SolAddress
-	}
-	log.Println("Got userID:", userID, "No user found")
-	return ""
-}
-
-func getPortID(xmrWallets [][]int, userID int) int {
-	for _, innerList := range xmrWallets {
-		if innerList[0] == userID {
-			return innerList[1]
-		}
-	}
-	return -100
-}
-
-func handleEthereumPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, fCrypto string, encrypted_ip string, USDAmount float64, userID int) {
-	address := getEthAddressByID(userID)
+func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *utils.CryptoSuperChat, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, fCrypto string, encrypted_ip string, USDAmount float64, userID int) {
+	address := ur.GetEthAddressByID(userID)
 	log.Println("handleEthereumPayment() address:", address)
 
 	decimals, _ := utils.GetCryptoDecimalsByCode(fCrypto)
@@ -4555,16 +2107,16 @@ func handleEthereumPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, name
 
 	tmp, _ := qrcode.Encode(donationLink, qrcode.Low, 320)
 	s.QRB64 = base64.StdEncoding.EncodeToString(tmp)
-	s.DonationID = createNewDono(userID, address, s.Name, s.Message, s.Amount, fCrypto, encrypted_ip, showAmount_, USDAmount, media_)
+	s.DonationID = dr.Create(userID, address, s.Name, s.Message, s.Amount, fCrypto, encrypted_ip, showAmount_, USDAmount, media_)
 	err := payTemplate.Execute(w, s)
 	if err != nil {
 		fmt.Println(err)
 	}
 }
 
-func handleSolanaPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, params url.Values, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, encrypted_ip string, USDAmount float64, userID int) {
+func handleSolanaPayment(w http.ResponseWriter, dr *models.DonoRepository, s *utils.CryptoSuperChat, params url.Values, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, encrypted_ip string, USDAmount float64, userID int) {
 	// Get Solana address and desired balance from request
-	address := getSolAddressByID(userID)
+	address := dr.UserRepo.GetSolAddressByID(userID)
 	donoStr := fmt.Sprintf("%.*f", 9, amount_)
 
 	s.Amount = donoStr
@@ -4587,7 +2139,7 @@ func handleSolanaPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, params
 	tmp, _ := qrcode.Encode("solana:"+address+"?amount="+donoStr, qrcode.Low, 320)
 	s.QRB64 = base64.StdEncoding.EncodeToString(tmp)
 
-	s.DonationID = createNewDono(userID, address, name_, message_, s.Amount, "SOL", encrypted_ip, showAmount_, USDAmount, media_)
+	s.DonationID = dr.Create(userID, address, name_, message_, s.Amount, "SOL", encrypted_ip, showAmount_, USDAmount, media_)
 
 	err := payTemplate.Execute(w, s)
 	if err != nil {
@@ -4595,9 +2147,9 @@ func handleSolanaPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, params
 	}
 }
 
-func handleMoneroPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, params url.Values, amount float64, encrypted_ip string, showAmount bool, USDAmount float64, userID int) {
+func handleMoneroPayment(w http.ResponseWriter, mr *models.MoneroRepository, s *utils.CryptoSuperChat, params url.Values, amount float64, encrypted_ip string, showAmount bool, USDAmount float64, userID int) {
 	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
-	portID := getPortID(xmrWallets, userID)
+	portID := mr.GetPortID(mr.XmrWallets, userID)
 
 	found := true
 	if portID == -100 {
@@ -4647,4 +2199,19 @@ func handleMoneroPayment(w http.ResponseWriter, s *utils.CryptoSuperChat, params
 	if err != nil {
 		fmt.Println(err)
 	}
+}
+
+func ethToWei(ethStr string) *big.Int {
+	etherValue := big.NewFloat(1000000000000000000)
+	f, err := strconv.ParseFloat(ethStr, 64)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil
+	}
+	number := big.NewFloat(f)
+
+	weiValue := new(big.Int)
+	weiValue, _ = weiValue.SetString(number.Mul(number, etherValue).Text('f', 0), 10)
+
+	return weiValue
 }
