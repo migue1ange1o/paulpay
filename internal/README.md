@@ -1,6 +1,8 @@
 # Overview of Internals
 
-Utilizing a repository design, where the data that makes up the application is prioritized and each component (user, dono, etc,) is broken up and given its own repo for types and methods
+Utilizing a repository design, where the data that makes up the application is prioritized and each component (user, dono, etc,) is broken up and given its own repo for types and methods.
+
+This strategy attempts to maintain the exact functionality of previous versions of PaulPay while optimizing code structure and the flow of data throughout the app.
 
 For now, there is...
 - users.go
