@@ -1,14 +1,18 @@
 # Overview of Internals
 
-- utilizing a repository design, where the data that makes up the application is prioritized and each component (user, dono, etc,) is broken up and given its own repo for types and methods
+Utilizing a repository design, where the data that makes up the application is prioritized and each component (user, dono, etc,) is broken up and given its own repo for types and methods
 
-for now, there is...
+For now, there is...
 - users.go
 - dono.go
 - billing.go
 - sol.go
 - xmr.go
-- utils.go
 - invite.go
+- utils.go
 
-The interfaces on each file will show the methods associated with each repository.
+Interfaces are provided on each page to show the methods that belong to that component's repository.
+
+ToDo:
+- Break up HTTP handlers from main.go
+- Write tests for each data model and its functionality

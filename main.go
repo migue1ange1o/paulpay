@@ -10,26 +10,20 @@ import (
 
 	//	"github.com/davecgh/go-spew/spew"
 	"html"
-	"io"
 	"io/ioutil"
 	"log"
 	"math"
-	"math/big"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"shadowchat/internal/models"
-	"shadowchat/utils"
 	"sort"
 	"strconv"
 	"strings"
 	"text/template"
 	"time"
-	"unicode/utf8"
 
-	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/bcrypt"
@@ -83,11 +77,11 @@ var db *sql.DB
 var amountNeeded = 1000.00
 var amountSent = 200.00
 
-var a utils.AlertPageData
-var pb utils.ProgressbarData
-var obsData utils.OBSDataStruct
+var a models.AlertPageData
+var pb models.ProgressbarData
+var obsData models.OBSDataStruct
 
-var prices utils.CryptoPrice
+var prices models.CryptoPrice
 
 var pbMessage = "Stream Tomorrow"
 
@@ -149,6 +143,69 @@ func checkLoggedInAdmin(w http.ResponseWriter, r *http.Request, ur *models.UserR
 	}
 }
 
+func main() {
+
+	var err error
+
+	// Open a new database connection
+	db, err = sql.Open("sqlite3", "users.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// set up repositories
+	sr := models.NewSolRepository(db)
+	ir := models.NewInviteRepository(db)
+	br := models.NewBillingRepository(db)
+	ur := models.NewUserRepository(db, sr, ir, br)
+	mr := models.NewMoneroRepository(db, ur)
+	dr := models.NewDonoRepository(db, ur, mr, sr)
+
+	// Check if the database and tables exist, and create them if they don't
+	err = models.CreateDatabaseIfNotExists(db, ur)
+	if err != nil {
+		log.Printf("Error creating database: %v", err)
+	}
+
+	// Run migrations on database
+	err = models.RunDatabaseMigrations(db)
+	if err != nil {
+		log.Printf("Error migrating database: %v", err)
+	}
+
+	go models.StartWallets(ur, mr, sr)
+
+	time.Sleep(5 * time.Second)
+	log.Println("Starting server")
+
+	setupRoutes(ur, dr, ir, mr)
+
+	time.Sleep(2 * time.Second)
+	// Schedule a function to run fetchExchangeRates every three minutes
+	go models.FetchExchangeRates(ur)
+	go dr.Check()
+	go models.CheckPendingAccounts(dr)
+	go models.CheckBillingAccounts(dr)
+
+	go dr.CheckAccountBillings()
+
+	a.Refresh = 10
+	pb.Refresh = 1
+	_ = ur.GetObsData(1)
+	ir.InviteCodeMap = ir.GetAllCodes()
+	models.SetServerVars(ur)
+
+	//go createTestDono(2, "Big Bob", "XMR", "This Cruel Message is Bob's Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! ", "50", 100, "https://www.youtube.com/watch?v=6iseNlvH2_s")
+	// go createTestDono("Medium Bob", "XMR", "Hey it's medium Bob ", 0.1, 3, "https://www.youtube.com/watch?v=6iseNlvH2_s")
+
+	err = http.ListenAndServe(":8900", nil)
+	if err != nil {
+		panic(err)
+	}
+
+}
+
 // Handler function for the "/donations" endpoint
 func donationsHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
 	log.Println("donationsHandler Called")
@@ -173,9 +230,9 @@ func donationsHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRep
 	defer rows.Close()
 
 	// Create a slice to hold the data
-	var donos []utils.Dono
+	var donos []models.Dono
 	for rows.Next() {
-		var dono utils.Dono
+		var dono models.Dono
 		var name, message, address, currencyType, encryptedIP, amountToSend, amountSent, mediaURL sql.NullString
 		var usdAmount sql.NullFloat64
 		var userID sql.NullInt64
@@ -221,71 +278,7 @@ func donationsHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRep
 		return
 	}
 }
-
-func main() {
-
-	var err error
-
-	// Open a new database connection
-	db, err = sql.Open("sqlite3", "users.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	// set up repositories
-	sr := models.NewSolRepository(db)
-	ir := models.NewInviteRepository(db)
-	br := models.NewBillingRepository(db)
-	ur := models.NewUserRepository(db, sr, br)
-	mr := models.NewMoneroRepository(db, ur)
-	dr := models.NewDonoRepository(db, ur, mr)
-
-	// Check if the database and tables exist, and create them if they don't
-	err = models.CreateDatabaseIfNotExists(db, ur)
-	if err != nil {
-		log.Printf("Error creating database: %v", err)
-	}
-
-	// Run migrations on database
-	err = models.RunDatabaseMigrations(db)
-	if err != nil {
-		log.Printf("Error migrating database: %v", err)
-	}
-
-	go models.StartWallets(ur, mr, sr)
-
-	time.Sleep(5 * time.Second)
-	log.Println("Starting server")
-
-	setupRoutes(ur)
-
-	time.Sleep(2 * time.Second)
-	// Schedule a function to run fetchExchangeRates every three minutes
-	go models.FetchExchangeRates(ur)
-	go dr.Check()
-	go models.CheckPendingAccounts(dr)
-	go models.CheckBillingAccounts(dr)
-
-	go dr.CheckAccountBillings()
-
-	a.Refresh = 10
-	pb.Refresh = 1
-	_ = ur.GetObsData(1)
-	inviteCodeMap = ir.GetAllCodes()
-	models.SetServerVars(ur)
-
-	//go createTestDono(2, "Big Bob", "XMR", "This Cruel Message is Bob's Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! ", "50", 100, "https://www.youtube.com/watch?v=6iseNlvH2_s")
-	// go createTestDono("Medium Bob", "XMR", "Hey it's medium Bob ", 0.1, 3, "https://www.youtube.com/watch?v=6iseNlvH2_s")
-
-	err = http.ListenAndServe(":8900", nil)
-	if err != nil {
-		panic(err)
-	}
-
-}
-
-func updateCryptosHandler(w http.ResponseWriter, r *http.Request) {
+func updateCryptosHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -298,7 +291,7 @@ func updateCryptosHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	var updateRequest utils.UpdateCryptosRequest
+	var updateRequest models.UpdateCryptosRequest
 	err = json.Unmarshal(body, &updateRequest)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to parse request body: %v", err), http.StatusBadRequest)
@@ -312,7 +305,7 @@ func updateCryptosHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -323,12 +316,12 @@ func updateCryptosHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println(userID, user.UserID)
 
 	if userID == user.UserID {
-		user.CryptosEnabled = mapToCryptosEnabled(updateRequest.SelectedCryptos)
+		user.CryptosEnabled = ur.MapToCryptosEnabled(updateRequest.SelectedCryptos)
 		if user.CryptosEnabled.XMR && !user.WalletUploaded {
 			user.CryptosEnabled.XMR = false
 		}
 		log.Println(user.CryptosEnabled)
-		err = updateUser(user)
+		err = ur.Update(user)
 		if err != nil {
 			log.Println(err)
 		}
@@ -337,25 +330,7 @@ func updateCryptosHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func mapToCryptosEnabled(selectedCryptos map[string]bool) utils.CryptosEnabled {
-	// Create a new instance of the CryptosEnabled struct
-	cryptosEnabled := utils.CryptosEnabled{}
-
-	// Set each field of the CryptosEnabled struct based on the corresponding value in the map
-	cryptosEnabled.XMR = selectedCryptos["monero"]
-	cryptosEnabled.SOL = selectedCryptos["solana"]
-	cryptosEnabled.ETH = selectedCryptos["ethereum"]
-	cryptosEnabled.PAINT = selectedCryptos["paint"]
-	cryptosEnabled.HEX = selectedCryptos["hex"]
-	cryptosEnabled.MATIC = selectedCryptos["matic"]
-	cryptosEnabled.BUSD = selectedCryptos["busd"]
-	cryptosEnabled.SHIB = selectedCryptos["shiba_inu"]
-	cryptosEnabled.PNK = selectedCryptos["pnk"]
-
-	// Return the populated CryptosEnabled struct
-	return cryptosEnabled
-}
-func setupRoutes(ur *models.UserRepository) {
+func setupRoutes(ur *models.UserRepository, dr *models.DonoRepository, ir *models.InviteRepository, mr *models.MoneroRepository) {
 	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/css/style.css")
 	})
@@ -432,40 +407,94 @@ func setupRoutes(ur *models.UserRepository) {
 	http.Handle("/users/", http.StripPrefix("/users/", http.FileServer(http.Dir("users/"))))
 
 	routes_ = []Route_{
-		{"/updatecryptos", updateCryptosHandler},
-		{"/update-links", updateLinksHandler},
-		{"/check_donation_status/", checkDonationStatusHandler},
-		{"/donations", donationsHandler},
-		{"/", indexHandler},
-		{"/termsofservice", tosHandler},
-		{"/pay", paymentHandler},
-		{"/alert", alertOBSHandler},
-		{"/viewdonos", viewDonosHandler},
-		{"/replaydono", replayDonoHandler},
-		{"/progressbar", progressbarOBSHandler},
+		{"/updatecryptos", func(w http.ResponseWriter, r *http.Request) {
+			updateCryptosHandler(w, r, ur)
+		}},
+		{"/update-links", func(w http.ResponseWriter, r *http.Request) {
+			updateLinksHandler(w, r, ur)
+		}},
+		{"/check_donation_status/", func(w http.ResponseWriter, r *http.Request) {
+			checkDonationStatusHandler(w, r, dr)
+		}},
+		{"/donations", func(w http.ResponseWriter, r *http.Request) {
+			donationsHandler(w, r, dr)
+		}},
+		{"/", func(w http.ResponseWriter, r *http.Request) {
+			indexHandler(w, r, ur)
+		}},
+		{"/termsofservice", func(w http.ResponseWriter, r *http.Request) {
+			tosHandler(w, r)
+		}},
+		{"/pay", func(w http.ResponseWriter, r *http.Request) {
+			paymentHandler(w, r, dr)
+		}},
+		{"/alert", func(w http.ResponseWriter, r *http.Request) {
+			alertOBSHandler(w, r, dr.UserRepo)
+		}},
+		{"/viewdonos", func(w http.ResponseWriter, r *http.Request) {
+			viewDonosHandler(w, r, ur)
+		}},
+		{"/replaydono", func(w http.ResponseWriter, r *http.Request) {
+			replayDonoHandler(w, r, dr)
+		}},
+		{"/progressbar", func(w http.ResponseWriter, r *http.Request) {
+			progressbarOBSHandler(w, r, ur)
+		}},
 		{"/login", func(w http.ResponseWriter, r *http.Request) {
 			loginHandler(w, r, ur)
 		}},
-		{"/incorrect_login", incorrectLoginHandler},
-		{"/user", userHandler},
-		{"/userobs", userOBSHandler},
-		{"/logout", logoutHandler},
-		{"/changepassword", changePasswordHandler},
-		{"/changeuser", changeUserHandler},
-		{"/register", registerUserHandler},
-		{"/newaccount", newAccountHandler},
-		{"/overflow", overflowHandler},
-		{"/billing", accountBillingHandler},
-		{"/changeusermonero", changeUserMoneroHandler},
-		{"/usermanager", allUsersHandler},
-		{"/refresh", refreshHandler},
-		{"/toggleUserRegistrations", toggleUserRegistrationsHandler},
-		{"/generatecodes", generateCodesHandler},
-		{"/cryptosettings", cryptoSettingsHandler},
+		{"/incorrect_login", func(w http.ResponseWriter, r *http.Request) {
+			incorrectLoginHandler(w, r)
+		}},
+		{"/user", func(w http.ResponseWriter, r *http.Request) {
+			userHandler(w, r, ur)
+		}},
+		{"/userobs", func(w http.ResponseWriter, r *http.Request) {
+			userOBSHandler(w, r, ur)
+		}},
+		{"/logout", func(w http.ResponseWriter, r *http.Request) {
+			logoutHandler(w, r)
+		}},
+		{"/changepassword", func(w http.ResponseWriter, r *http.Request) {
+			changePasswordHandler(w, r, ur)
+		}},
+		{"/changeuser", func(w http.ResponseWriter, r *http.Request) {
+			changeUserHandler(w, r, ur)
+		}},
+		{"/register", func(w http.ResponseWriter, r *http.Request) {
+			registerUserHandler(w, r, ur)
+		}},
+		{"/newaccount", func(w http.ResponseWriter, r *http.Request) {
+			newAccountHandler(w, r, ur, ir, dr, mr)
+		}},
+		{"/overflow", func(w http.ResponseWriter, r *http.Request) {
+			overflowHandler(w, r)
+		}},
+		{"/billing", func(w http.ResponseWriter, r *http.Request) {
+			accountBillingHandler(w, r, ur)
+		}},
+		{"/changeusermonero", func(w http.ResponseWriter, r *http.Request) {
+			changeUserMoneroHandler(w, r, mr)
+		}},
+		{"/usermanager", func(w http.ResponseWriter, r *http.Request) {
+			allUsersHandler(w, r, ur)
+		}},
+		{"/refresh", func(w http.ResponseWriter, r *http.Request) {
+			refreshHandler(w, r, ur)
+		}},
+		{"/toggleUserRegistrations", func(w http.ResponseWriter, r *http.Request) {
+			toggleUserRegistrationsHandler(w, r, ur)
+		}},
+		{"/generatecodes", func(w http.ResponseWriter, r *http.Request) {
+			generateCodesHandler(w, r, ur)
+		}},
+		{"/(cryptosettings", func(w http.ResponseWriter, r *http.Request) {
+			cryptoSettingsHandler(w, r, ur, mr)
+		}},
 	}
 
 	for _, route_ := range routes_ {
-		http.HandleFunc(route_.Path, logging(route_.Handler))
+		http.HandleFunc(route_.Path, logging(route_.Handler, dr))
 	}
 
 	indexTemplate, _ = template.ParseFiles("web/templates/index.html")
@@ -493,11 +522,11 @@ func setupRoutes(ur *models.UserRepository) {
 	incorrectPasswordTemplate, _ = template.ParseFiles("web/templates/password_change_failed.html")
 }
 
-func logging(f http.HandlerFunc) http.HandlerFunc {
+func logging(f http.HandlerFunc, dr *models.DonoRepository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/overflow" && r.URL.Path != "/progressbar" && r.URL.Path != "/donations" && r.URL.Path != "/check_donation_status" && r.URL.Path != "/replaydono" && r.URL.Path != "/viewdonos" {
-			ip := getIPAddress(r)
-			matchingIP := CheckRecentIPRequests(ip)
+			ip := models.GetIPAddress(r)
+			matchingIP := dr.CheckRecentIPRequests(ip)
 			if matchingIP >= 200 {
 				http.Redirect(w, r, "/overflow", http.StatusSeeOther)
 				return
@@ -507,16 +536,16 @@ func logging(f http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func replayDonoHandler(w http.ResponseWriter, r *http.Request) {
+func replayDonoHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	user, valid := getLoggedInUser(w, r)
+	user, valid := getLoggedInUser(w, r, dr.UserRepo)
 
-	var donation utils.Donation
+	var donation models.Donation
 	err := json.NewDecoder(r.Body).Decode(&donation)
 	if err != nil {
 		fmt.Printf("Error decoding JSON")
@@ -528,7 +557,7 @@ func replayDonoHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Received donation replay: %+v\n", donation)
 
 	if valid {
-		replayDono(donation, user.UserID)
+		dr.ReplayDono(donation, user.UserID)
 	} else {
 		http.Error(w, "Invalid donation trying to be replayed", http.StatusBadRequest)
 		return
@@ -538,31 +567,21 @@ func replayDonoHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func checkValidSubscription(DateEnabled time.Time) bool {
-	oneMonthAhead := DateEnabled.AddDate(0, 1, 0)
-	if oneMonthAhead.After(time.Now().UTC()) {
-		log.Println("User valid")
-		return true
-	}
-	log.Println("checkValidSubscription() User not valid")
-	return false
-}
-
-func getLoggedInUser(w http.ResponseWriter, r *http.Request) (utils.User, bool) {
+func getLoggedInUser(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) (models.User, bool) {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
-		return utils.User{}, false // Return an instance of utils.User with empty/default values
+		return models.User{}, false // Return an instance of models.User with empty/default values
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
-		return utils.User{}, false // Return an instance of utils.User with empty/default values
+		return models.User{}, false // Return an instance of models.User with empty/default values
 	}
 
 	return user, true
 }
 
-func allUsersHandler(w http.ResponseWriter, r *http.Request) {
+func allUsersHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
@@ -571,7 +590,7 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -583,13 +602,13 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 		data := struct {
 			Title            string
 			RegistrationOpen bool
-			Users            map[int]utils.User
-			InviteCodes      map[string]utils.InviteCode
+			Users            map[int]models.User
+			InviteCodes      map[string]models.InviteCode
 		}{
 			Title:            "Users Dashboard",
 			RegistrationOpen: PublicRegistrationsEnabled,
-			Users:            globalUsers,
-			InviteCodes:      inviteCodeMap,
+			Users:            ur.Users,
+			InviteCodes:      ur.InviteRepo.InviteCodeMap,
 		}
 
 		// Parse the HTML template and execute it with the data
@@ -609,11 +628,11 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func generateCodesHandler(w http.ResponseWriter, r *http.Request) {
-	if checkLoggedInAdmin(w, r) {
-		generateMoreInviteCodes(5)
+func generateCodesHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
+	if checkLoggedInAdmin(w, r, ur) {
+		ur.InviteRepo.GenerateMoreInviteCodes(5)
 		http.Redirect(w, r, "/usermanager", http.StatusSeeOther)
-		allUsersHandler(w, r)
+		allUsersHandler(w, r, ur)
 	} else {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -621,12 +640,12 @@ func generateCodesHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func toggleUserRegistrationsHandler(w http.ResponseWriter, r *http.Request) {
+func toggleUserRegistrationsHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 
-	if checkLoggedInAdmin(w, r) {
+	if checkLoggedInAdmin(w, r, ur) {
 		PublicRegistrationsEnabled = !PublicRegistrationsEnabled
 		http.Redirect(w, r, "/usermanager", http.StatusSeeOther)
-		allUsersHandler(w, r)
+		allUsersHandler(w, r, ur)
 	} else {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -634,15 +653,15 @@ func toggleUserRegistrationsHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func refreshHandler(w http.ResponseWriter, r *http.Request) {
-	if checkLoggedInAdmin(w, r) {
-		user, _ := getUserByUsernameCached(r.FormValue("username"))
-		renewUserSubscription(user)
+func refreshHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
+	if checkLoggedInAdmin(w, r, ur) {
+		user, _ := ur.GetUserByUsernameCached(r.FormValue("username"))
+		ur.RenewUserSubscription(user)
 	}
-	allUsersHandler(w, r)
+	allUsersHandler(w, r, ur)
 }
 
-func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
+func viewDonosHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
@@ -651,13 +670,13 @@ func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 
-	cookie = cookie
+	// cookie = cookie
 
 	// Retrieve data from the donos table
 	rows, err := db.Query("SELECT * FROM donos WHERE fulfilled = 1 AND amount_sent != 0 ORDER BY created_at DESC")
@@ -668,9 +687,9 @@ func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	// Create a slice to hold the data
-	var donos []utils.Dono
+	var donos []models.Dono
 	for rows.Next() {
-		var dono utils.Dono
+		var dono models.Dono
 		var name, amountToSend, amountSent, message, address, currencyType, encryptedIP, mediaURL sql.NullString
 		var usdAmount sql.NullFloat64
 		var userID sql.NullInt64
@@ -727,24 +746,11 @@ func viewDonosHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := utils.ViewDonosData{
+	data := models.ViewDonosData{
 		Username: user.Username,
 		Donos:    donos,
 	}
 	tpl.Execute(w, data)
-}
-
-func createNewEthDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) utils.SuperChat {
-	new_dono := utils.CreatePendingDono(name, message, mediaURL, amountNeeded, cryptoCode, encrypted_ip)
-	pending_donos = utils.AppendPendingDono(pending_donos, new_dono)
-
-	return new_dono
-}
-
-// verify that the entered password matches the stored hashed password for a user
-func verifyPassword(user utils.User, password string) bool {
-	err := bcrypt.CompareHashAndPassword(user.HashedPassword, []byte(password))
-	return err == nil
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
@@ -767,7 +773,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request, ur *models.UserReposit
 			return
 		}
 
-		sessionToken, err := createSession(user.UserID)
+		sessionToken, err := ur.CreateSession(user.UserID)
 		if err != nil {
 			log.Println(err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -792,7 +798,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request, ur *models.UserReposit
 	}
 }
 
-func userOBSHandler(w http.ResponseWriter, r *http.Request) {
+func userOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
 		fmt.Println(err)
@@ -800,7 +806,7 @@ func userOBSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -808,7 +814,7 @@ func userOBSHandler(w http.ResponseWriter, r *http.Request) {
 
 	obsData.URLdonobar = host_url + "progressbar?value=" + user.AlertURL
 	obsData.URLdisplay = host_url + "alert?value=" + user.AlertURL
-	obsData_ := getObsData(db, user.UserID)
+	obsData_ := ur.GetObsData(user.UserID)
 	obsData_.Username = user.Username
 
 	if r.Method == http.MethodPost {
@@ -874,7 +880,7 @@ func userOBSHandler(w http.ResponseWriter, r *http.Request) {
 		pb.Needed = amountNeeded
 		pb.Sent = amountSent
 
-		err = updateObsData(db, user.UserID, obsData_.FilenameGIF, obsData_.FilenameMP3, "alice", pb)
+		err = ur.UpdateObsData(user.UserID, obsData_.FilenameGIF, obsData_.FilenameMP3, "alice", pb)
 
 		if err != nil {
 			log.Println("Error: ", err)
@@ -904,7 +910,7 @@ func userOBSHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // handle requests to modify user data
-func userHandler(w http.ResponseWriter, r *http.Request) {
+func userHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	cookie, err := r.Cookie("session_token")
 	if err != nil {
 		fmt.Println(err)
@@ -912,7 +918,7 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, valid := getUserBySessionCached(cookie.Value)
+	user, valid := ur.GetUserBySessionCached(cookie.Value)
 	if !valid {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -928,8 +934,8 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 		mediaEnabled := r.FormValue("mediaenabled") == "on"
 		user.MediaEnabled = mediaEnabled
 
-		user = setUserMinDonos(user)
-		err := updateUser(user)
+		user = ur.SetUserMinDonos(user)
+		err := ur.Update(user)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -944,7 +950,7 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		User  utils.User
+		User  models.User
 		Links string // Changed to string to hold JSON
 	}{
 		User:  user,
@@ -961,18 +967,18 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func updateLinksHandler(w http.ResponseWriter, r *http.Request) {
+func updateLinksHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	// Get the links parameter from the POST request
 	linksJson := r.PostFormValue("links")
 	username := r.PostFormValue("username")
 
 	cookie, _ := r.Cookie("session_token")
-	user, _ := getUserBySessionCached(cookie.Value)
+	user, _ := ur.GetUserBySessionCached(cookie.Value)
 
 	if user.Username == username {
 
 		// Parse the JSON string into a slice of Link structs
-		var links []utils.Link
+		var links []models.Link
 		err := json.Unmarshal([]byte(linksJson), &links)
 		if err != nil {
 			// Handle error
@@ -980,7 +986,7 @@ func updateLinksHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		user.Links = linksJson
-		updateUser(user)
+		ur.Update(user)
 		http.Redirect(w, r, "/user", http.StatusSeeOther)
 		return
 	}
@@ -988,25 +994,25 @@ func updateLinksHandler(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
+func changePasswordHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	// retrieve user from session
 	sessionToken, err := r.Cookie("session_token")
 	if err != nil {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	user, valid := getUserBySessionCached(sessionToken.Value)
+	user, valid := ur.GetUserBySessionCached(sessionToken.Value)
 	if !valid {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	// initialize user page data struct
-	data := utils.UserPageData{}
+	data := models.UserPageData{}
 
 	// process form submission
 	if r.Method == "POST" {
 		// check current password
-		if !verifyPassword(user, r.FormValue("current_password")) {
+		if !ur.VerifyPassword(user, r.FormValue("current_password")) {
 			// set user page data values
 			data.ErrorMessage = "Current password entered was incorrect"
 			// render password change failed form
@@ -1026,7 +1032,7 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			// update user password in database
 			user.HashedPassword = hashedPassword
-			err = updateUser(user)
+			err = ur.Update(user)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -1046,7 +1052,7 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, data)
 }
 
-func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
+func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request, mr *models.MoneroRepository) {
 	log.Println("Starting change user handler function")
 	// retrieve user from session
 	sessionToken, err := r.Cookie("session_token")
@@ -1054,14 +1060,14 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	user, valid := getUserBySessionCached(sessionToken.Value)
+	user, valid := mr.UserRepo.GetUserBySessionCached(sessionToken.Value)
 	if !valid {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
 	// initialize user page data struct
-	data := utils.UserPageData{}
+	data := models.UserPageData{}
 
 	// process form submission
 	if r.Method == "POST" {
@@ -1072,7 +1078,7 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if user.WalletUploaded {
-			stopMoneroWallet(user)
+			mr.StopMoneroWallet(user)
 		}
 
 		// Get the uploaded monero wallet file and save it to disk
@@ -1083,7 +1089,7 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			defer file.Close()
 			walletPath := filepath.Join(moneroDir, "wallet")
-			err = saveFileToDisk(file, header, walletPath)
+			err = models.SaveFileToDisk(file, header, walletPath)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				user.WalletUploaded = false
@@ -1099,7 +1105,7 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			defer file.Close()
 			walletKeyPath := filepath.Join(moneroDir, "wallet.keys")
-			err = saveFileToDisk(file, header, walletKeyPath)
+			err = models.SaveFileToDisk(file, header, walletKeyPath)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				user.WalletUploaded = false
@@ -1113,7 +1119,7 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 
 			// convert xmrWallets to a map
 			existingWallets := make(map[int]int)
-			for _, wallet := range xmrWallets {
+			for _, wallet := range mr.XmrWallets {
 				existingWallets[wallet[0]*10000+wallet[1]] = 1
 			}
 
@@ -1122,17 +1128,17 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("Monero wallet uploaded")
 			// check if the element exists in the map and append if not
 			if _, ok := existingWallets[user.UserID*10000+starting_port]; !ok {
-				xmrWallets = append(xmrWallets, []int{user.UserID, starting_port})
+				mr.XmrWallets = append(mr.XmrWallets, []int{user.UserID, starting_port})
 				walletRunning = false
 			}
-			go startMoneroWallet(starting_port, user.UserID, user)
+			go mr.StartMoneroWallet(starting_port, user.UserID, user)
 			if !walletRunning {
 				starting_port++
 			}
 		}
 
 		// Update the user with the new data
-		err = updateUser(user)
+		err = mr.UserRepo.Update(user)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1152,11 +1158,11 @@ func changeUserMoneroHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, data)
 }
 
-func registerUserHandler(w http.ResponseWriter, r *http.Request) {
+func registerUserHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
-		user, valid := getUserBySessionCached(cookie.Value)
-		if valid && !checkLoggedInAdmin(w, r) {
+		user, valid := ur.GetUserBySessionCached(cookie.Value)
+		if valid && !checkLoggedInAdmin(w, r, ur) {
 			log.Println("Already logged in as", user.Username, " - redirecting from registration to user panel.")
 			http.Redirect(w, r, "/user", http.StatusSeeOther)
 			return
@@ -1171,7 +1177,7 @@ func registerUserHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func changeUserHandler(w http.ResponseWriter, r *http.Request) {
+func changeUserHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	log.Println("Starting change user handler function")
 	// retrieve user from session
 	sessionToken, err := r.Cookie("session_token")
@@ -1179,14 +1185,14 @@ func changeUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	user, valid := getUserBySessionCached(sessionToken.Value)
+	user, valid := ur.GetUserBySessionCached(sessionToken.Value)
 	if !valid {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
 	// initialize user page data struct
-	data := utils.UserPageData{}
+	data := models.UserPageData{}
 
 	// process form submission
 	if r.Method == "POST" {
@@ -1205,8 +1211,8 @@ func changeUserHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Update the user with the new data
 
-		user = setUserMinDonos(user)
-		err = updateUser(user)
+		user = ur.SetUserMinDonos(user)
+		err = ur.Update(user)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1226,22 +1232,7 @@ func changeUserHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, data)
 }
 
-func saveFileToDisk(file multipart.File, header *multipart.FileHeader, path string) error {
-	out, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, file)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func renderChangePasswordForm(w http.ResponseWriter, data utils.UserPageData) {
+func renderChangePasswordForm(w http.ResponseWriter, data models.UserPageData) {
 	tmpl, err := template.ParseFiles("web/templates/user.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1271,109 +1262,14 @@ func incorrectLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func createSession(userID int) (string, error) {
-	sessionToken := uuid.New().String()
-	userSessions[sessionToken] = userID
-	return sessionToken, nil
-}
-
-func validateSession(r *http.Request) (int, error) {
-	sessionToken, err := r.Cookie("session_token")
-	if err != nil {
-		return 0, fmt.Errorf("no session token found")
-	}
-	userID, ok := userSessions[sessionToken.Value]
-	if !ok {
-		return 0, fmt.Errorf("invalid session token")
-	}
-	return userID, nil
-}
-
-func condenseSpaces(s string) string {
-	return strings.Join(strings.Fields(s), " ")
-}
-
-func truncateStrings(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for !utf8.ValidString(s[:n]) {
-		n--
-	}
-	return s[:n]
-}
-
-func getUserPathByID(id int) string {
-	return fmt.Sprintf("users/%d/", id)
-}
-
-func checkFileExists(filePath string) bool {
-	_, err := os.Stat(filePath)
-	if err == nil {
-		// File exists
-		return true
-	} else {
-		return false
-	}
-
-}
-
-func checkUserGIF(userpath string) bool {
-	up := userpath + "gifs/default.gif"
-	//log.Println("checking", up)
-	b := checkFileExists(up)
-	if b {
-		log.Println("user gif exists")
-	} else {
-		log.Println("user gif doesn't exist")
-	}
-	return b
-}
-
-func checkUserSound(userpath string) bool {
-	up := userpath + "sounds/default.mp3"
-	//log.Println("checking", up)
-	b := checkFileExists(up)
-	if b {
-		log.Println("user sound exists")
-	} else {
-		log.Println("user sound doesn't exist")
-	}
-	return b
-}
-
-func checkUserMoneroWallet(userpath string) bool {
-	up := userpath + "monero/wallet"
-	//log.Println("checking", up)
-	b := checkFileExists(up)
-	if b {
-		log.Println("user wallet exists")
-	} else {
-		log.Println("user wallet doesn't exist")
-	}
-	return b
-}
-
-func checkUserMoneroWalletKeys(userpath string) bool {
-	up := userpath + "monero/wallet"
-	//log.Println("checking", up)
-	b := checkFileExists(up)
-	if b {
-		log.Println("user wallet keys exists")
-	} else {
-		log.Println("user wallet keys doesn't exist")
-	}
-	return b
-}
-
-func alertOBSHandler(w http.ResponseWriter, r *http.Request) {
+func alertOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	value := r.URL.Query().Get("value")
-	user, _ := getUserByAlertURL(value)
+	user, _ := ur.GetUserByAlertURL(value)
 
-	newDono, err := checkDonoQueue(db, user.UserID)
-	a.Userpath = getUserPathByID(user.UserID)
+	newDono, err := checkDonoQueue(user.UserID, ur)
+	a.Userpath = models.GetUserPathByID(user.UserID)
 
-	if !checkUserGIF(a.Userpath) || !checkUserSound(a.Userpath) { // check if user has uploaded custom gif/sounds for alert
+	if !models.CheckUserGIF(a.Userpath) || !models.CheckUserSound(a.Userpath) { // check if user has uploaded custom gif/sounds for alert
 		a.Userpath = "media/"
 	}
 
@@ -1397,7 +1293,7 @@ func alertOBSHandler(w http.ResponseWriter, r *http.Request) {
 
 func progressbarOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 	value := r.URL.Query().Get("value")
-	obsData, err := getOBSDataByAlertURL(value)
+	obsData, err := ur.GetOBSDataByAlertURL(value)
 
 	if err != nil {
 		log.Println(err)
@@ -1409,10 +1305,6 @@ func progressbarOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.Us
 		return
 	}
 
-	/*log.Println("Progress bar message:", obsData.Message)
-	log.Println("Progress bar needed:", obsData.Needed)
-	log.Println("Progress bar sent:", obsData.Sent)*/
-
 	pb.Message = obsData.Message
 	pb.Needed = obsData.Needed
 	pb.Sent = obsData.Sent
@@ -1421,25 +1313,6 @@ func progressbarOBSHandler(w http.ResponseWriter, r *http.Request, ur *models.Us
 	if err != nil {
 		fmt.Println(err)
 	}
-}
-
-func cryptosStructToJSONString(s utils.CryptosEnabled) string {
-	bytes, err := json.Marshal(s)
-	if err != nil {
-		log.Println("cryptosStructToJSONString error:", err)
-		return ""
-	}
-	return string(bytes)
-}
-
-func cryptosJsonStringToStruct(jsonStr string) utils.CryptosEnabled {
-	var s utils.CryptosEnabled
-	err := json.Unmarshal([]byte(jsonStr), &s)
-	if err != nil {
-		log.Println("cryptosJsonStringToStruct error:", err)
-		return utils.CryptosEnabled{}
-	}
-	return s
 }
 
 func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository, mr *models.MoneroRepository) {
@@ -1455,11 +1328,11 @@ func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request, ur *models.Us
 		http.Redirect(w, r, "/user", http.StatusSeeOther)
 		return
 	} else {
-		userPath := getUserPathByID(user.UserID)
+		userPath := models.GetUserPathByID(user.UserID)
 		moneroWalletString := "monero wallet not uploaded"
 		moneroWalletKeysString := "monero wallet not key uploaded"
 
-		if checkUserMoneroWallet(userPath) && !mr.CheckMoneroPort(user.UserID) {
+		if models.CheckUserMoneroWallet(userPath) && !mr.CheckMoneroPort(user.UserID) {
 			moneroWalletString = "monero wallet uploaded but not running correctly. Please ensure you have created a view only wallet with no password."
 			moneroWalletKeysString = "monero wallet key uploaded but not running correctly. Please ensure you have created a view only wallet with no password."
 		}
@@ -1496,8 +1369,8 @@ func cryptoSettingsHandler(w http.ResponseWriter, r *http.Request, ur *models.Us
 			DateEnabled            time.Time
 			WalletUploaded         bool
 			WalletPending          bool
-			CryptosEnabled         utils.CryptosEnabled
-			BillingData            utils.BillingData
+			CryptosEnabled         models.CryptosEnabled
+			BillingData            models.BillingData
 			MoneroWalletString     string
 			MoneroWalletKeysString string
 		}{
@@ -1604,19 +1477,6 @@ func overflowHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func getIPAddress(r *http.Request) string {
-	ip := r.Header.Get("X-Real-IP")
-	if ip == "" {
-		ip = r.Header.Get("X-Forwarded-For")
-	}
-
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
-
-	return ip
-}
-
 func indexHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
 
 	// Ignore requests for the favicon
@@ -1659,7 +1519,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request, ur *models.UserReposit
 
 		}
 
-		i := utils.IndexDisplay{
+		i := models.IndexDisplay{
 			MaxChar:        MessageMaxChar,
 			MinDono:        user.MinDono,
 			MinSolana:      user.MinSol,
@@ -1729,7 +1589,7 @@ func checkDonoQueue(userID int, ur *models.UserRepository) (bool, error) {
 	// update the form in memory
 	a.Name = name
 	a.Message = message
-	a.Amount, _ = strconv.ParseFloat(utils.PruneStringDecimals(fmt.Sprintf("%f", amount), 4), 64)
+	a.Amount, _ = strconv.ParseFloat(models.PruneStringDecimals(fmt.Sprintf("%f", amount), 4), 64)
 	a.Currency = currency
 	a.MediaURL = media_url
 	a.USDAmount = usd_amount
@@ -1780,7 +1640,7 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRe
 	username := r.FormValue("username")
 	invitecode := r.FormValue("invitecode")
 
-	username = utils.SanitizeStringLetters(username)
+	username = models.SanitizeStringLetters(username)
 
 	password := r.FormValue("password")
 	isAdmin := checkLoggedInAdmin(w, r, ur)
@@ -1825,7 +1685,7 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRe
 
 			xmrNeededFormatted := fmt.Sprintf("%.5f", xmrNeeded)
 
-			d := utils.AccountPayData{
+			d := models.AccountPayData{
 				Username:    pendingUser.Username,
 				AmountXMR:   xmrNeededFormatted,
 				AmountETH:   pendingUser.ETHNeeded,
@@ -1856,7 +1716,7 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRe
 func checkUsernamePendingOrCreated(username_ string, ur *models.UserRepository) bool {
 	username := strings.ToLower(username_)
 	for _, route_ := range routes_ {
-		if utils.SanitizeStringLetters(route_.Path) == username {
+		if models.SanitizeStringLetters(route_.Path) == username {
 			return true
 		}
 	}
@@ -1879,21 +1739,21 @@ func checkUsernamePendingOrCreated(username_ string, ur *models.UserRepository) 
 
 }
 
-func accountBillingHandler(w http.ResponseWriter, r *http.Request) {
-	checkLoggedIn(w, r)
+func accountBillingHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository) {
+	checkLoggedIn(w, r, ur)
 	cookie, _ := r.Cookie("session_token")
-	user, _ := getUserBySessionCached(cookie.Value)
+	user, _ := ur.GetUserBySessionCached(cookie.Value)
 
 	if user.BillingData.NeedToPay {
 
-		admin, _ := getUserByUsernameCached("admin")
+		admin, _ := ur.GetUserByUsernameCached("admin")
 		xmrAmount, err := strconv.ParseFloat(user.BillingData.XMRAmount, 64)
 		if err != nil {
 			log.Println("error parsing xmr value")
 		}
 
 		xmrNeededFormatted := fmt.Sprintf("%.5f", xmrAmount)
-		d := utils.AccountPayData{
+		d := models.AccountPayData{
 			Username:    user.Username,
 			AmountXMR:   xmrNeededFormatted,
 			BillingData: user.BillingData,
@@ -1921,34 +1781,9 @@ func accountBillingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getNewAccountETHPrice() string {
-	ethPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.18f", (15.00/prices.Ethereum)), 64)
-	ethStr := utils.FuzzDono(ethPrice, "ETH")
-	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
-	return ethStr_
-}
-func getNewAccountXMRPrice() string {
-	xmrPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.5f", (15.00/prices.Monero)), 64)
-	xmrStr, _ := utils.StandardizeFloatToString(xmrPrice)
-	return xmrStr
-}
-
-func getXMRAmountInUSD(usdAmount float64) string {
-	xmrPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.5f", (usdAmount/prices.Monero)), 64)
-	xmrStr, _ := utils.StandardizeFloatToString(xmrPrice)
-	return xmrStr
-}
-
-func getETHAmountInUSD(usdAmount float64) string {
-	ethPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.18f", (usdAmount/prices.Ethereum)), 64)
-	ethStr := utils.FuzzDono(ethPrice, "ETH")
-	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
-	return ethStr_
-}
-
-func paymentHandler(w http.ResponseWriter, r *http.Request) {
+func paymentHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
 	username := r.FormValue("username")
-	user, validUser := getUserByUsernameCached(username)
+	user, validUser := dr.UserRepo.GetUserByUsernameCached(username)
 
 	if r.Method != http.MethodPost || !validUser {
 		// Redirect to the payment page if the request is not a POST request
@@ -1957,7 +1792,7 @@ func paymentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get the user's IP address
-	ip := getIPAddress(r)
+	ip := models.GetIPAddress(r)
 	log.Println("dono ip", ip)
 
 	// Get form values
@@ -1967,10 +1802,10 @@ func paymentHandler(w http.ResponseWriter, r *http.Request) {
 	fMessage := r.FormValue("message")
 	fMedia := r.FormValue("media")
 	fShowAmount := r.FormValue("showAmount")
-	encrypted_ip := encryptIP(ip)
+	encrypted_ip := dr.EncryptIP(ip)
 	log.Println("encrypted_ip", encrypted_ip)
 
-	matching_ips := utils.CheckPendingDonosFromIP(pending_donos, ip)
+	matching_ips := dr.CheckPendingDonosFromIP(ip)
 
 	log.Println("Waiting pending donos from this IP:", matching_ips)
 	if matching_ips >= 9 {
@@ -2018,44 +1853,32 @@ func paymentHandler(w http.ResponseWriter, r *http.Request) {
 
 	showAmount, _ := strconv.ParseBool(fShowAmount)
 
-	var s utils.CryptoSuperChat
+	var s models.CryptoSuperChat
 	params := url.Values{}
 
 	params.Add("name", name)
 	params.Add("msg", message)
-	params.Add("media", condenseSpaces(media))
+	params.Add("media", models.CondenseSpaces(media))
 	params.Add("amount", strconv.FormatFloat(amount, 'f', 4, 64))
 	params.Add("show", strconv.FormatBool(showAmount))
 
 	s.Amount = strconv.FormatFloat(amount, 'f', 4, 64)
-	s.Name = html.EscapeString(truncateStrings(condenseSpaces(name), NameMaxChar))
-	s.Message = html.EscapeString(truncateStrings(condenseSpaces(message), MessageMaxChar))
+	s.Name = html.EscapeString(models.TruncateStrings(models.CondenseSpaces(name), NameMaxChar))
+	s.Message = html.EscapeString(models.TruncateStrings(models.CondenseSpaces(message), MessageMaxChar))
 	s.Media = html.EscapeString(media)
 
-	USDAmount := getUSDValue(amount, fCrypto)
+	USDAmount := models.GetUSDValue(amount, fCrypto)
 	if fCrypto == "XMR" {
-		createNewXMRDono(s.Name, s.Message, s.Media, amount, encrypted_ip)
-		handleMoneroPayment(w, &s, params, amount, encrypted_ip, showAmount, USDAmount, user.UserID)
+		dr.CreateNewXMRDono(s.Name, s.Message, s.Media, amount, encrypted_ip)
+		handleMoneroPayment(w, dr, &s, params, amount, encrypted_ip, showAmount, USDAmount, user.UserID)
 	} else if fCrypto == "SOL" {
-		new_dono := createNewSolDono(s.Name, s.Message, s.Media, utils.FuzzDono(amount, "SOL"), encrypted_ip)
-		handleSolanaPayment(w, &s, params, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, media, encrypted_ip, USDAmount, user.UserID)
+		new_dono := dr.CreateNewSolDono(s.Name, s.Message, s.Media, models.FuzzDono(amount, "SOL"), encrypted_ip)
+		handleSolanaPayment(w, dr, &s, params, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, media, encrypted_ip, USDAmount, user.UserID)
 	} else {
 		s.Currency = fCrypto
-		new_dono := createNewEthDono(s.Name, s.Message, s.Media, amount, fCrypto, encrypted_ip)
-		handleEthereumPayment(w, &s, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, new_dono.MediaURL, fCrypto, encrypted_ip, USDAmount, user.UserID)
+		new_dono := dr.CreateNewEthDono(s.Name, s.Message, s.Media, amount, fCrypto, encrypted_ip)
+		handleEthereumPayment(w, dr, &s, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, new_dono.MediaURL, fCrypto, encrypted_ip, USDAmount, user.UserID)
 	}
-}
-
-func createNewSolDono(name string, message string, mediaURL string, amountNeeded float64, encrypted_ip string) utils.SuperChat {
-	new_dono := utils.CreatePendingDono(name, message, mediaURL, amountNeeded, "SOL", encrypted_ip)
-	pending_donos = utils.AppendPendingDono(pending_donos, new_dono)
-
-	return new_dono
-}
-
-func createNewXMRDono(name string, message string, mediaURL string, amountNeeded float64, encrypted_ip string) {
-	new_dono := utils.CreatePendingDono(name, message, mediaURL, amountNeeded, "XMR", encrypted_ip)
-	pending_donos = utils.AppendPendingDono(pending_donos, new_dono)
 }
 
 func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepository) {
@@ -2075,11 +1898,11 @@ func checkDonationStatusHandler(w http.ResponseWriter, r *http.Request, dr *mode
 	}
 }
 
-func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *utils.CryptoSuperChat, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, fCrypto string, encrypted_ip string, USDAmount float64, userID int) {
-	address := ur.GetEthAddressByID(userID)
+func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *models.CryptoSuperChat, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, fCrypto string, encrypted_ip string, USDAmount float64, userID int) {
+	address := dr.UserRepo.GetEthAddressByID(userID)
 	log.Println("handleEthereumPayment() address:", address)
 
-	decimals, _ := utils.GetCryptoDecimalsByCode(fCrypto)
+	decimals, _ := models.GetCryptoDecimalsByCode(fCrypto)
 	donoStr := fmt.Sprintf("%.*f", decimals, amount_)
 	log.Println("handleEthereumPayment() donoStr:", address)
 
@@ -2087,7 +1910,7 @@ func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *
 	log.Println("handleEthereumPayment() donoStr:", s.Amount)
 
 	if fCrypto != "ETH" {
-		s.ContractAddress, _ = utils.GetCryptoContractByCode(fCrypto)
+		s.ContractAddress, _ = models.GetCryptoContractByCode(fCrypto)
 	} else {
 		s.ContractAddress = "ETH"
 	}
@@ -2096,10 +1919,10 @@ func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *
 		s.Name = "Anonymous"
 		name_ = s.Name
 	} else {
-		s.Name = html.EscapeString(truncateStrings(condenseSpaces(name_), NameMaxChar))
+		s.Name = html.EscapeString(models.TruncateStrings(models.CondenseSpaces(name_), NameMaxChar))
 	}
 
-	s.WeiAmount = ethToWei(donoStr)
+	s.WeiAmount = models.EthToWei(donoStr)
 	s.Media = html.EscapeString(media_)
 	s.Address = address
 
@@ -2114,7 +1937,7 @@ func handleEthereumPayment(w http.ResponseWriter, dr *models.DonoRepository, s *
 	}
 }
 
-func handleSolanaPayment(w http.ResponseWriter, dr *models.DonoRepository, s *utils.CryptoSuperChat, params url.Values, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, encrypted_ip string, USDAmount float64, userID int) {
+func handleSolanaPayment(w http.ResponseWriter, dr *models.DonoRepository, s *models.CryptoSuperChat, params url.Values, name_ string, message_ string, amount_ float64, showAmount_ bool, media_ string, encrypted_ip string, USDAmount float64, userID int) {
 	// Get Solana address and desired balance from request
 	address := dr.UserRepo.GetSolAddressByID(userID)
 	donoStr := fmt.Sprintf("%.*f", 9, amount_)
@@ -2124,7 +1947,7 @@ func handleSolanaPayment(w http.ResponseWriter, dr *models.DonoRepository, s *ut
 	if name_ == "" {
 		s.Name = "Anonymous"
 	} else {
-		s.Name = html.EscapeString(truncateStrings(condenseSpaces(name_), NameMaxChar))
+		s.Name = html.EscapeString(models.TruncateStrings(models.CondenseSpaces(name_), NameMaxChar))
 	}
 
 	s.Media = html.EscapeString(media_)
@@ -2147,9 +1970,9 @@ func handleSolanaPayment(w http.ResponseWriter, dr *models.DonoRepository, s *ut
 	}
 }
 
-func handleMoneroPayment(w http.ResponseWriter, mr *models.MoneroRepository, s *utils.CryptoSuperChat, params url.Values, amount float64, encrypted_ip string, showAmount bool, USDAmount float64, userID int) {
+func handleMoneroPayment(w http.ResponseWriter, dr *models.DonoRepository, s *models.CryptoSuperChat, params url.Values, amount float64, encrypted_ip string, showAmount bool, USDAmount float64, userID int) {
 	payload := strings.NewReader(`{"jsonrpc":"2.0","id":"0","method":"make_integrated_address"}`)
-	portID := mr.GetPortID(mr.XmrWallets, userID)
+	portID := dr.MoneroRepo.GetPortID(dr.MoneroRepo.XmrWallets, userID)
 
 	found := true
 	if portID == -100 {
@@ -2176,7 +1999,7 @@ func handleMoneroPayment(w http.ResponseWriter, mr *models.MoneroRepository, s *
 		log.Println("ERROR CREATING")
 	}
 
-	resp := &utils.RPCResponse{}
+	resp := &models.RPCResponse{}
 	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
 		fmt.Println(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -2193,25 +2016,10 @@ func handleMoneroPayment(w http.ResponseWriter, mr *models.MoneroRepository, s *
 	tmp, _ := qrcode.Encode(fmt.Sprintf("monero:%s?tx_amount=%s", resp.Result.IntegratedAddress, s.Amount), qrcode.Low, 320)
 	s.QRB64 = base64.StdEncoding.EncodeToString(tmp)
 
-	s.DonationID = createNewDono(userID, s.PayID, s.Name, s.Message, s.Amount, "XMR", encrypted_ip, showAmount, USDAmount, s.Media)
+	s.DonationID = dr.Create(userID, s.PayID, s.Name, s.Message, s.Amount, "XMR", encrypted_ip, showAmount, USDAmount, s.Media)
 
 	err = payTemplate.Execute(w, s)
 	if err != nil {
 		fmt.Println(err)
 	}
-}
-
-func ethToWei(ethStr string) *big.Int {
-	etherValue := big.NewFloat(1000000000000000000)
-	f, err := strconv.ParseFloat(ethStr, 64)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil
-	}
-	number := big.NewFloat(f)
-
-	weiValue := new(big.Int)
-	weiValue, _ = weiValue.SetString(number.Mul(number, etherValue).Text('f', 0), 10)
-
-	return weiValue
 }

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"shadowchat/utils"
 	"strconv"
 	"strings"
 
@@ -21,6 +20,15 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type RPCResponse struct {
+	ID      string `json:"id"`
+	Jsonrpc string `json:"jsonrpc"`
+	Result  struct {
+		IntegratedAddress string `json:"integrated_address"`
+		PaymentID         string `json:"payment_id"`
+	} `json:"result"`
+}
+
 type MoneroPrice struct {
 	Monero struct {
 		Usd float64 `json:"usd"`
@@ -29,9 +37,11 @@ type MoneroPrice struct {
 
 type MoneroRepositoryInterface interface {
 	getBalance(checkID string, userID int) (float64, error)
-	startMoneroWallet(portInt, userID int, user User)
-	getPortID(xmrWallets [][]int, userID int) int
+	StartMoneroWallet(portInt, userID int, user User)
+	GetPortID(xmrWallets [][]int, userID int) int
 	CheckMoneroPort(userID int) bool
+	GetNewAccountXMR() (string, string)
+	StopMoneroWallet(user User)
 }
 
 type MoneroRepository struct {
@@ -130,7 +140,7 @@ func (mr *MoneroRepository) getBalance(checkID string, userID int) (float64, err
 	return amount / math.Pow(10, 12), nil
 }
 
-func (mr *MoneroRepository) startMoneroWallet(portInt, userID int, user User) {
+func (mr *MoneroRepository) StartMoneroWallet(portInt, userID int, user User) {
 	portID := mr.GetPortID(mr.XmrWallets, userID)
 	found := true
 
@@ -205,7 +215,7 @@ func (mr *MoneroRepository) CheckMoneroPort(userID int) bool {
 		return false
 	}
 
-	resp := &utils.RPCResponse{}
+	resp := &RPCResponse{}
 	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
 		return false
 	}
@@ -250,7 +260,7 @@ func (mr *MoneroRepository) GetNewAccountXMR() (string, string) {
 		return "", ""
 	}
 
-	resp := &utils.RPCResponse{}
+	resp := &RPCResponse{}
 	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
 		log.Println("ERROR DECODING RESPONSE:", err)
 		return "", ""
@@ -262,4 +272,32 @@ func (mr *MoneroRepository) GetNewAccountXMR() (string, string) {
 
 	log.Println("RETURNING XMR PAYID:", PayID)
 	return PayID, PayAddress
+}
+
+func (mr *MoneroRepository) StopMoneroWallet(user User) {
+	portID := mr.GetPortID(mr.XmrWallets, user.UserID)
+
+	found := true
+	if portID == -100 {
+		found = false
+	}
+
+	if !found {
+		fmt.Println("Port ID not found for user", user.UserID)
+		return
+	}
+
+	portStr := strconv.Itoa(portID)
+
+	cmd := exec.Command("monero/monero-wallet-rpc", "--rpc-bind-port", portStr, "--command", "stop_wallet")
+
+	// Capture the output of the command
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("Error running command: %v\n", err)
+		return
+	}
+
+	// Print the output of the command
+	fmt.Println(string(output))
 }

@@ -4,19 +4,105 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"math/big"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
+	"os"
 	"regexp"
-	"shadowchat/utils"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 var starting_port int = 28088
+
+var cryptoMap = map[string]map[string]interface{}{
+	"paint": {
+		"name":     "Paint",
+		"code":     "PAINT",
+		"svg":      "paint.svg",
+		"min":      "{{.MinPaint}}",
+		"contract": contracts["PAINT"],
+		"decimals": 18,
+	},
+	"hex": {
+		"name":     "Hexcoin",
+		"code":     "HEX",
+		"svg":      "hex.svg",
+		"min":      "{{.MinHex}}",
+		"contract": contracts["HEX"],
+		"decimals": 8,
+	},
+	"matic": {
+		"name":     "Polygon",
+		"code":     "MATIC",
+		"svg":      "matic.svg",
+		"min":      "{{.MinPolygon}}",
+		"contract": contracts["MATIC"],
+		"decimals": 18,
+	},
+	"busd": {
+		"name":     "Binance USD",
+		"code":     "BUSD",
+		"svg":      "busd.svg",
+		"min":      "{{.MinBusd}}",
+		"contract": contracts["BUSD"],
+		"decimals": 18,
+	},
+	"shiba_inu": {
+		"name":     "Shiba Inu",
+		"code":     "SHIB",
+		"svg":      "shiba_inu.svg",
+		"min":      "{{.MinShib}}",
+		"contract": contracts["SHIBA_INU"],
+		"decimals": 18,
+	},
+	"pnk": {
+		"name":     "Kleros",
+		"code":     "PNK",
+		"svg":      "pnk.svg",
+		"min":      "{{.MinPnk}}",
+		"contract": contracts["PNK"],
+		"decimals": 18,
+	},
+}
+
+type IndexDisplay struct {
+	MaxChar        int
+	MinDono        int
+	MinSolana      float64
+	MinMonero      float64
+	MinEthereum    float64
+	MinPaint       float64
+	MinHex         float64
+	MinPolygon     float64
+	MinBusd        float64
+	MinShib        float64
+	MinPnk         float64
+	SolPrice       float64
+	XMRPrice       float64
+	ETHPrice       float64
+	PaintPrice     float64
+	HexPrice       float64
+	PolygonPrice   float64
+	BusdPrice      float64
+	ShibPrice      float64
+	PnkPrice       float64
+	MinAmnt        float64
+	WalletPending  bool
+	Links          string
+	Checked        string
+	CryptosEnabled CryptosEnabled
+	DefaultCrypto  string
+	Username       string
+}
 
 func CreateDatabaseIfNotExists(db *sql.DB, ur *UserRepository) error {
 	// create the tables if they don't exist
@@ -243,7 +329,7 @@ func updateColumnDateEnabledIfNull(db *sql.DB, tableName, columnName string) err
 
 func updateColumnAlertURLIfNull(db *sql.DB, tableName, columnName string) error {
 	if checkDatabaseColumnExist(db, tableName, columnName) {
-		value := utils.GenerateUniqueURL()
+		value := GenerateUniqueURL()
 		_, err := db.Exec(`UPDATE `+tableName+` SET `+columnName+` = ? WHERE `+columnName+` IS NULL`, value)
 		if err != nil {
 			return err
@@ -346,8 +432,8 @@ func StartWallets(ur *UserRepository, mr *MoneroRepository, sr *SolRepository) {
 			log.Println("User valid", user.UserID, "User eth_address:", ur.Users[user.UserID].EthAddress)
 			if user.WalletUploaded {
 				log.Println("Monero wallet uploaded")
-				mr.xmrWallets = append(mr.xmrWallets, []int{user.UserID, starting_port})
-				go mr.startMoneroWallet(starting_port, user.UserID, user)
+				mr.XmrWallets = append(mr.XmrWallets, []int{user.UserID, starting_port})
+				go mr.StartMoneroWallet(starting_port, user.UserID, user)
 				starting_port++
 
 			} else {
@@ -524,10 +610,10 @@ func CheckPendingAccounts(dr *DonoRepository) {
 
 		for _, user := range dr.UserRepo.PendingUsers {
 			xmrFl, _ := dr.MoneroRepo.getBalance(user.XMRPayID, 1)
-			xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
+			xmrSent, _ := StandardizeFloatToString(xmrFl)
 
 			log.Println("XMR sent:", xmrSent)
-			xmrSentStr, _ := utils.ConvertStringTo18DecimalPlaces(xmrSent)
+			xmrSentStr, _ := ConvertStringTo18DecimalPlaces(xmrSent)
 			log.Println("XMR sent str:", xmrSentStr)
 			log.Println("XMRNeeded str:", user.XMRNeeded)
 			if user.XMRNeeded == xmrSentStr {
@@ -547,15 +633,15 @@ func CheckPendingAccounts(dr *DonoRepository) {
 func CheckBillingAccounts(dr *DonoRepository) {
 	for {
 		tMapGenerated := false
-		transactionMap := make(map[string]utils.Transfer)
+		transactionMap := make(map[string]Transfer)
 
 		for _, user := range dr.UserRepo.Users {
 
 			if user.BillingData.NeedToPay {
 
 				xmrFl, _ := dr.MoneroRepo.getBalance(user.BillingData.XMRPayID, 1)
-				xmrSent, _ := utils.StandardizeFloatToString(xmrFl)
-				xmrSentStr, _ := utils.StandardizeString(xmrSent)
+				xmrSent, _ := StandardizeFloatToString(xmrFl)
+				xmrSentStr, _ := StandardizeString(xmrSent)
 				if user.BillingData.XMRAmount == xmrSentStr {
 					dr.UserRepo.RenewUserSubscription(user)
 					continue
@@ -566,16 +652,16 @@ func CheckBillingAccounts(dr *DonoRepository) {
 				if !tMapGenerated { //Generate Map from transaction slice
 					for _, transaction := range dr.Transfers {
 						hash := dr.GetTransactionAmount(transaction)
-						standard_hash, _ := utils.StandardizeString(hash)
+						standard_hash, _ := StandardizeString(hash)
 						dr.TransactionMap[standard_hash] = transaction
 					}
 					tMapGenerated = true
 				}
 
-				valueToCheck, _ := utils.StandardizeString(user.BillingData.ETHAmount)
+				valueToCheck, _ := StandardizeString(user.BillingData.ETHAmount)
 				transaction, ok := transactionMap[valueToCheck]
 				if ok {
-					tN := utils.GetTransactionToken(transaction)
+					tN := dr.GetTransactionToken(transaction)
 					if tN == "ETH" && transaction.To == adminETHAdd {
 						dr.UserRepo.RenewUserSubscription(user)
 						continue
@@ -624,27 +710,27 @@ func SetServerVars(ur *UserRepository) {
 
 func GetNewAccountXMRPrice() string {
 	xmrPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.5f", (15.00/prices.Monero)), 64)
-	xmrStr, _ := utils.StandardizeFloatToString(xmrPrice)
+	xmrStr, _ := StandardizeFloatToString(xmrPrice)
 	return xmrStr
 }
 
 func GetXMRAmountInUSD(usdAmount float64) string {
 	xmrPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.5f", (usdAmount/prices.Monero)), 64)
-	xmrStr, _ := utils.StandardizeFloatToString(xmrPrice)
+	xmrStr, _ := StandardizeFloatToString(xmrPrice)
 	return xmrStr
 }
 
 func GetETHAmountInUSD(usdAmount float64) string {
 	ethPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.18f", (usdAmount/prices.Ethereum)), 64)
-	ethStr := utils.FuzzDono(ethPrice, "ETH")
-	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
+	ethStr := FuzzDono(ethPrice, "ETH")
+	ethStr_, _ := StandardizeFloatToString(ethStr)
 	return ethStr_
 }
 
 func GetNewAccountETHPrice() string {
 	ethPrice, _ := strconv.ParseFloat(fmt.Sprintf("%.18f", (15.00/prices.Ethereum)), 64)
-	ethStr := utils.FuzzDono(ethPrice, "ETH")
-	ethStr_, _ := utils.StandardizeFloatToString(ethStr)
+	ethStr := FuzzDono(ethPrice, "ETH")
+	ethStr_, _ := StandardizeFloatToString(ethStr)
 	return ethStr_
 }
 
@@ -681,4 +767,187 @@ func CreateNewPendingUser(username string, password string, dr *DonoRepository, 
 	log.Println("finish createNewPendingUser() without error")
 	return user, nil
 
+}
+
+func CreatePendingDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) SuperChat {
+	amountNeeded = FuzzDono(amountNeeded, cryptoCode)
+	pendingDono := SuperChat{
+		Name:         name,
+		Message:      message,
+		MediaURL:     mediaURL,
+		AmountNeeded: amountNeeded,
+		Completed:    false,
+		CreatedAt:    time.Now().String(),
+		CheckedAt:    time.Now().String(),
+		CryptoCode:   cryptoCode,
+		EncryptedIP:  encrypted_ip,
+	}
+	return pendingDono
+}
+
+func AppendPendingDono(pending_donos []SuperChat, new_dono SuperChat) []SuperChat {
+	pending_donos = append(pending_donos, new_dono)
+	return pending_donos
+}
+
+func EthToWei(ethStr string) *big.Int {
+	etherValue := big.NewFloat(1000000000000000000)
+	f, err := strconv.ParseFloat(ethStr, 64)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil
+	}
+	number := big.NewFloat(f)
+
+	weiValue := new(big.Int)
+	weiValue, _ = weiValue.SetString(number.Mul(number, etherValue).Text('f', 0), 10)
+
+	return weiValue
+}
+
+func GetIPAddress(r *http.Request) string {
+	ip := r.Header.Get("X-Real-IP")
+	if ip == "" {
+		ip = r.Header.Get("X-Forwarded-For")
+	}
+
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+
+	return ip
+}
+
+func CondenseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func TruncateStrings(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for !utf8.ValidString(s[:n]) {
+		n--
+	}
+	return s[:n]
+}
+
+func GetUserPathByID(id int) string {
+	return fmt.Sprintf("users/%d/", id)
+}
+
+func CheckFileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	if err == nil {
+		// File exists
+		return true
+	} else {
+		return false
+	}
+
+}
+
+func CheckUserGIF(userpath string) bool {
+	up := userpath + "gifs/default.gif"
+	//log.Println("checking", up)
+	b := CheckFileExists(up)
+	if b {
+		log.Println("user gif exists")
+	} else {
+		log.Println("user gif doesn't exist")
+	}
+	return b
+}
+
+func CheckUserSound(userpath string) bool {
+	up := userpath + "sounds/default.mp3"
+	//log.Println("checking", up)
+	b := CheckFileExists(up)
+	if b {
+		log.Println("user sound exists")
+	} else {
+		log.Println("user sound doesn't exist")
+	}
+	return b
+}
+
+func CheckUserMoneroWallet(userpath string) bool {
+	up := userpath + "monero/wallet"
+	//log.Println("checking", up)
+	b := CheckFileExists(up)
+	if b {
+		log.Println("user wallet exists")
+	} else {
+		log.Println("user wallet doesn't exist")
+	}
+	return b
+}
+
+func CheckUserMoneroWalletKeys(userpath string) bool {
+	up := userpath + "monero/wallet"
+	//log.Println("checking", up)
+	b := CheckFileExists(up)
+	if b {
+		log.Println("user wallet keys exists")
+	} else {
+		log.Println("user wallet keys doesn't exist")
+	}
+	return b
+}
+
+func SaveFileToDisk(file multipart.File, header *multipart.FileHeader, path string) error {
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, file)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func GetCryptoDecimalsByCode(code string) (int, error) {
+	if code == "ETH" {
+		return 18, nil
+	} else {
+		code = strings.ToUpper(code)
+		for _, cryptoInfo := range cryptoMap {
+			if cryptoInfo["code"] == code {
+				decimals, ok := cryptoInfo["decimals"].(int)
+				if !ok {
+					return 0, fmt.Errorf("decimals value for crypto with code %s is not an integer", code)
+				}
+				return decimals, nil
+			}
+		}
+		return 0, fmt.Errorf("crypto with code %s not found", code)
+	}
+}
+
+func GetCryptoContractByCode(code string) (string, error) {
+	code = strings.ToUpper(code)
+	for _, cryptoInfo := range cryptoMap {
+		if cryptoInfo["code"] == code {
+			contract, ok := cryptoInfo["contract"].(string)
+			if !ok {
+				return "", fmt.Errorf("contract value for %s is not a string", code)
+			}
+			return contract, nil
+		}
+	}
+	return "", fmt.Errorf("crypto with code %s not found", code)
+}
+
+func CheckValidSubscription(DateEnabled time.Time) bool {
+	oneMonthAhead := DateEnabled.AddDate(0, 1, 0)
+	if oneMonthAhead.After(time.Now().UTC()) {
+		log.Println("User valid")
+		return true
+	}
+	log.Println("checkValidSubscription() User not valid")
+	return false
 }

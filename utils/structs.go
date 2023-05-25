@@ -307,12 +307,6 @@ type MoneroPrice struct {
 	} `json:"monero"`
 }
 
-// Add the following struct to store the incoming data
-type UpdateCryptosRequest struct {
-	UserID          string          `json:"userId"`
-	SelectedCryptos map[string]bool `json:"selectedCryptos"`
-}
-
 type ViewDonosData struct {
 	Username string
 	Donos    []Dono

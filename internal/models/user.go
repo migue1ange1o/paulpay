@@ -6,14 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
-	"shadowchat/utils"
 	"strconv"
 
 	//	"github.com/davecgh/go-spew/spew"
 
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -61,6 +62,29 @@ type User struct {
 	DefaultCrypto        string
 }
 
+type UserPageData struct {
+	ErrorMessage string
+}
+
+// Add the following struct to store the incoming data
+type UpdateCryptosRequest struct {
+	UserID          string          `json:"userId"`
+	SelectedCryptos map[string]bool `json:"selectedCryptos"`
+}
+
+type AccountPayData struct {
+	Username    string
+	AmountXMR   string
+	AmountETH   string
+	AddressXMR  string
+	AddressETH  string
+	QRB64XMR    string
+	QRB64ETH    string
+	UserID      int
+	BillingData BillingData
+	DateCreated time.Time
+}
+
 type Link struct {
 	URL         string `json:"url"`
 	Description string `json:"description"`
@@ -104,40 +128,60 @@ type UserRepositoryInterface interface {
 	GetByID(userID int) (User, error)
 	CreateAdmin()
 	GetNew(username string, hashedPassword []byte) User
-	createNew(username, password string) error
-	create(user User) int
-	getAll() ([]User, error)
-	update(user User) error
-	updateObsData(userID int, gifName string, mp3Name string, ttsVoice string, pbData ProgressbarData) error
-	createNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string)
-	insertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error
-	getOBSDataByUserID(userID int) (utils.OBSDataStruct, error)
-	printUserColumns() error
-	setUserMinDonos(user User) User
-	setMinDonos()
-	getAdminETHAdd() string
-	getUserBySessionCached(sessionToken string) (User, bool)
-	getUserByUsernameCached(username string) (User, bool)
-	getUserByUsername(username string) (User, error)
-	createNewUserFromPending(user_ PendingUser) error
-	deletePendingUser(user PendingUser) error
-	renewUserSubscription(user User)
+	CreateNew(username, password string) error
+	Create(user User) int
+	GetAll() ([]User, error)
+	Update(user User) error
+	UpdateObsData(userID int, gifName string, mp3Name string, ttsVoice string, pbData ProgressbarData) error
+	CreateNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string)
+	InsertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData ProgressbarData) error
+	GetOBSDataByUserID(userID int) (OBSDataStruct, error)
+	PrintUserColumns() error
+	SetUserMinDonos(user User) User
+	SetMinDonos()
+	GetAdminETHAdd() string
+	GetUserBySessionCached(sessionToken string) (User, bool)
+	GetUserByUsernameCached(username string) (User, bool)
+	GetUserByUsername(username string) (User, error)
+	CreateNewUserFromPending(user_ PendingUser) error
+	DeletePendingUser(user PendingUser) error
+	RenewUserSubscription(user User)
+	GetObsData(userId int) OBSDataStruct
+	VerifyPassword(user User, password string) bool
+	GetEthAddressByID(userID int) string
+	GetSolAddressByID(userID int) string
+	CreatePending(user PendingUser) error
+	GetOBSDataByAlertURL(AlertURL string) (OBSDataStruct, error)
+	GetUserByAlertURL(AlertURL string) (User, error)
+	CheckUserByID(id int) bool
+	CheckUserByUsername(username string) (bool, int)
+	GetUserBySession(sessionToken string) (User, error)
+	GetUserLinks(user User) ([]Link, error)
+	GetUserCryptosEnabled(user User) (User, error)
+	GetActiveXMRUsers() ([]*User, error)
+	GetActiveETHUsers() ([]*User, error)
+	UpdateEnabledDate(userID int) error
+	MapToCryptosEnabled(selectedCryptos map[string]bool) CryptosEnabled
+	CreateSession(userID int) (string, error)
+	ValidateSession(r *http.Request) (int, error)
 }
 
 type UserRepository struct {
 	Db           *sql.DB
 	SolRepo      *SolRepository
 	BillingRepo  *BillingRepository
+	InviteRepo   *InviteRepository
 	Users        map[int]User
 	PendingUsers map[int]PendingUser
 	UserSessions map[string]int
 }
 
-func NewUserRepository(db *sql.DB, sr *SolRepository, br *BillingRepository) *UserRepository {
+func NewUserRepository(db *sql.DB, sr *SolRepository, ir *InviteRepository, br *BillingRepository) *UserRepository {
 	return &UserRepository{
 		Db:           db,
 		SolRepo:      sr,
 		BillingRepo:  br,
+		InviteRepo:   ir,
 		Users:        make(map[int]User),
 		PendingUsers: make(map[int]PendingUser),
 		UserSessions: make(map[string]int),
@@ -184,7 +228,7 @@ func (ur *UserRepository) GetNew(username string, hashedPassword []byte) User {
 		MediaEnabled:      true,
 		DonoGIF:           "default.gif",
 		DonoSound:         "default.mp3",
-		AlertURL:          utils.GenerateUniqueURL(),
+		AlertURL:          GenerateUniqueURL(),
 		WalletUploaded:    false,
 		Links:             "",
 		DateEnabled:       time.Now().UTC(),
@@ -484,7 +528,7 @@ func (ur *UserRepository) UpdateObsData(userID int, gifName string, mp3Name stri
 }
 
 func (ur *UserRepository) CreateNewOBS(userID int, message string, needed, sent float64, refresh int, gifFile, soundFile, ttsVoice string) {
-	pbData := utils.ProgressbarData{
+	pbData := ProgressbarData{
 		Message: message,
 		Needed:  needed,
 		Sent:    sent,
@@ -497,7 +541,7 @@ func (ur *UserRepository) CreateNewOBS(userID int, message string, needed, sent 
 
 }
 
-func (ur *UserRepository) InsertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData utils.ProgressbarData) error {
+func (ur *UserRepository) InsertObsData(userId int, gifName, mp3Name, ttsVoice string, pbData ProgressbarData) error {
 	obsData := `
         INSERT INTO obs (
             user_id,
@@ -512,8 +556,8 @@ func (ur *UserRepository) InsertObsData(userId int, gifName, mp3Name, ttsVoice s
 	return err
 }
 
-func (ur *UserRepository) GetOBSDataByUserID(userID int) (utils.OBSDataStruct, error) {
-	var obsData utils.OBSDataStruct
+func (ur *UserRepository) GetOBSDataByUserID(userID int) (OBSDataStruct, error) {
+	var obsData OBSDataStruct
 	//var alertURL sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
 	row := ur.Db.QueryRow("SELECT gif_name, mp3_name, `message`, needed, sent FROM obs WHERE user_id=?", userID)
 
@@ -637,7 +681,7 @@ func (ur *UserRepository) GetUserByUsername(username string) (User, error) {
 
 	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
 	if !alertURL.Valid {            // check if the "dono_gif" column is null
-		user.AlertURL = utils.GenerateUniqueURL() // set the user's "DonoSound"
+		user.AlertURL = GenerateUniqueURL() // set the user's "DonoSound"
 	}
 
 	ce := CryptosEnabled{
@@ -1047,7 +1091,7 @@ func (ur *UserRepository) GetActiveXMRUsers() ([]*User, error) {
 	return users, nil
 }
 
-func (ur *UserRepository) getActiveETHUsers() ([]*User, error) {
+func (ur *UserRepository) GetActiveETHUsers() ([]*User, error) {
 	var users []*User
 
 	// Define the query to select the active ETH users
@@ -1085,4 +1129,41 @@ func (ur *UserRepository) UpdateEnabledDate(userID int) error {
 	}
 
 	return nil
+}
+
+func (ur *UserRepository) MapToCryptosEnabled(selectedCryptos map[string]bool) CryptosEnabled {
+	// Create a new instance of the CryptosEnabled struct
+	cryptosEnabled := CryptosEnabled{}
+
+	// Set each field of the CryptosEnabled struct based on the corresponding value in the map
+	cryptosEnabled.XMR = selectedCryptos["monero"]
+	cryptosEnabled.SOL = selectedCryptos["solana"]
+	cryptosEnabled.ETH = selectedCryptos["ethereum"]
+	cryptosEnabled.PAINT = selectedCryptos["paint"]
+	cryptosEnabled.HEX = selectedCryptos["hex"]
+	cryptosEnabled.MATIC = selectedCryptos["matic"]
+	cryptosEnabled.BUSD = selectedCryptos["busd"]
+	cryptosEnabled.SHIB = selectedCryptos["shiba_inu"]
+	cryptosEnabled.PNK = selectedCryptos["pnk"]
+
+	// Return the populated CryptosEnabled struct
+	return cryptosEnabled
+}
+
+func (ur *UserRepository) CreateSession(userID int) (string, error) {
+	sessionToken := uuid.New().String()
+	ur.UserSessions[sessionToken] = userID
+	return sessionToken, nil
+}
+
+func (ur *UserRepository) ValidateSession(r *http.Request) (int, error) {
+	sessionToken, err := r.Cookie("session_token")
+	if err != nil {
+		return 0, fmt.Errorf("no session token found")
+	}
+	userID, ok := ur.UserSessions[sessionToken.Value]
+	if !ok {
+		return 0, fmt.Errorf("invalid session token")
+	}
+	return userID, nil
 }

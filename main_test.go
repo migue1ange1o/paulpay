@@ -20,10 +20,11 @@ func TestMain(t *testing.T) {
 	defer db.Close()
 
 	sr := models.NewSolRepository(db)
+	ir := models.NewInviteRepository(db)
 	br := models.NewBillingRepository(db)
-	ur := models.NewUserRepository(db, sr, br)
+	ur := models.NewUserRepository(db, sr, ir, br)
 	mr := models.NewMoneroRepository(db, ur)
-	dr := models.NewDonoRepository(db, ur, mr)
+	dr := models.NewDonoRepository(db, ur, mr, sr)
 
 	// Check if the database and tables exist, and create them if they don't
 	err = models.CreateDatabaseIfNotExists(db, ur)
@@ -48,12 +49,12 @@ func TestMain(t *testing.T) {
 	go models.CheckPendingAccounts(dr)
 	go models.CheckBillingAccounts(dr)
 
-	go checkAccountBillings()
+	go dr.CheckAccountBillings()
 
 	a.Refresh = 10
 	pb.Refresh = 1
 	_ = ur.GetObsData(1)
-	inviteCodeMap = getAllCodes()
+	ir.InviteCodeMap = ir.GetAllCodes()
 	models.SetServerVars(ur)
 
 	go dr.CreateTestDono(2, "Big Bob", "XMR", "This Cruel Message is Bob's Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! Test message! ", "50", 100, "https://www.youtube.com/watch?v=6iseNlvH2_s")

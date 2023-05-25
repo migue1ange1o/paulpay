@@ -13,11 +13,14 @@ type InviteCode struct {
 }
 
 type InviteRepositoryInterface interface {
-	getAllCodes() map[string]InviteCode
-	createNewInviteCode(value string, active bool) error
-	updateInviteCode(code InviteCode) error
-	generateMoreInviteCodes(codeAmount int)
-	checkValidInviteCode(ic string) bool
+	GetAllCodes() map[string]InviteCode
+	CreateNewInviteCode(value string, active bool) error
+	UpdateInviteCode(code InviteCode) error
+	GenerateMoreInviteCodes(codeAmount int)
+	CheckValidInviteCode(ic string) bool
+	GenerateUniqueCode() string
+	GenerateUniqueCodes(amount int) map[string]InviteCode
+	AddInviteCodes(existingMap map[string]InviteCode, newMap map[string]InviteCode) map[string]InviteCode
 }
 
 type InviteRepository struct {

@@ -23,10 +23,11 @@ func TestDonoRepository_CheckUnfulfilled(t *testing.T) {
 	defer db.Close()
 
 	sr := NewSolRepository(db)
+	ir := NewInviteRepository(db)
 	br := NewBillingRepository(db)
-	ur := NewUserRepository(db, sr, br)
+	ur := NewUserRepository(db, sr, ir, br)
 	mr := NewMoneroRepository(db, ur)
-	dr := NewDonoRepository(db, ur, mr)
+	dr := NewDonoRepository(db, ur, mr, sr)
 
 	// Check if the database and tables exist, and create them if they don't
 	err = CreateDatabaseIfNotExists(db, ur)
@@ -87,17 +88,17 @@ func TestDonoRepository_CheckUnfulfilled(t *testing.T) {
 
 	// Add test data to DonoRepository
 	for _, dono := range donations {
-		dr.donos[dono.ID] = dono
+		dr.Donos[dono.ID] = dono
 	}
 
 	// Call the CheckUnfulfilled method
-	fulfilledDonos, err := dr.checkUnfulfilled()
+	fulfilledDonos, err := dr.CheckUnfulfilled()
 	if err != nil {
 		log.Printf("complete failure: %s", err)
 	}
 	// Assert the expected behavior
 	assert.NoError(t, err)
-	assert.Equal(t, len(dr.donos), len(fulfilledDonos)) // All unfulfilled donations should be marked as fulfilled
+	assert.Equal(t, len(dr.Donos), len(fulfilledDonos)) // All unfulfilled donations should be marked as fulfilled
 
 	// Verify the data integrity
 	for _, dono := range fulfilledDonos {
