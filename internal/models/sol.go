@@ -163,13 +163,14 @@ func (sr *SolRepository) SetSolWallets(sW map[int]SolWallet) {
 func (sr *SolRepository) GetTransactionsForAddresses() {
 	for _, wallet := range solWallets {
 		sameBalance := false
-
 		wallet, sameBalance = sr.CheckSameBalanceSol(wallet)
 
 		if sameBalance {
+			fmt.Println("Sol wallet the same balance, not getting new txs")
 			fmt.Println("SOL:", wallet.Address[:7]+".. no new txs.")
 			time.Sleep(10 * time.Second)
 		} else {
+			fmt.Println("Sol wallet not the same balance, getting new txs")
 			endpoint := rpc.MainNetBeta_RPC
 			client := rpc.New(endpoint)
 			out, err := client.GetSignaturesForAddress(

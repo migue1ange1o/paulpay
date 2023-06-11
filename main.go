@@ -147,6 +147,26 @@ func main() {
 
 	var err error
 
+	// Open the log file in append mode, create it if it doesn't exist
+	file, err := os.OpenFile("logfile.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	// Set the log output to the log file
+	log.SetOutput(file)
+
+	// Your script code here
+	// ...
+
+	// If your script crashes, log the error
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("Script crashed:", r)
+		}
+	}()
+
 	// Open a new database connection
 	db, err = sql.Open("sqlite3", "users.db")
 	if err != nil {
@@ -1570,9 +1590,11 @@ func indexHandler(w http.ResponseWriter, r *http.Request, ur *models.UserReposit
 			fmt.Println(err)
 		}
 	} else {
-
-		errorHandler(w, r, "User not found", "didn't find a ferret account with that username", "No username was found.")
-
+		log.Println("username = ", username)
+		if username != "" {
+			errorHandler(w, r, "User not found", "didn't find a ferret account with that username", "No username was found.")
+			return
+		}
 		// If no username is present in the URL path, serve the indexTemplate
 		err := indexTemplate.Execute(w, nil)
 		if err != nil {
