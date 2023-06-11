@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	//	"github.com/davecgh/go-spew/spew"
 
@@ -642,7 +643,7 @@ func (ur *UserRepository) GetUserBySessionCached(sessionToken string) (User, boo
 
 func (ur *UserRepository) GetUserByUsernameCached(username string) (User, bool) {
 	for _, user := range ur.Users {
-		if user.Username == username {
+		if strings.ToLower(user.Username) == strings.ToLower(username) {
 			return user, true
 		}
 	}
@@ -651,61 +652,61 @@ func (ur *UserRepository) GetUserByUsernameCached(username string) (User, bool) 
 }
 
 // get a user by their username
-func (ur *UserRepository) GetUserByUsername(username string) (User, error) {
-	var user User
-	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
-	row := ur.Db.QueryRow("SELECT * FROM users WHERE Username=?", username)
-	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
-		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
-		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
-	if err != nil {
-		return User{}, err
-	}
-	user.Links = links.String
-	if !links.Valid {
-		user.Links = ""
-	}
-	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoGIF.Valid {           // check if the "dono_gif" column is null
-		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
-	}
-	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !donoSound.Valid {             // check if the "dono_gif" column is null
-		user.DonoSound = "default.mp3" // set the user's "DonoSound"
-	}
+// func (ur *UserRepository) GetUserByUsername(username string) (User, error) {
+// 	var user User
+// 	var links, donoGIF, defaultCrypto, donoSound, alertURL, cryptosEnabled sql.NullString // use sql.NullString for the "links" and "dono_gif" fields
+// 	row := ur.Db.QueryRow("SELECT * FROM users WHERE Username=?", username)
+// 	err := row.Scan(&user.UserID, &user.Username, &user.HashedPassword, &user.EthAddress,
+// 		&user.SolAddress, &user.HexcoinAddress, &user.XMRWalletPassword, &user.MinDono, &user.MinMediaDono,
+// 		&user.MediaEnabled, &user.CreationDatetime, &user.ModificationDatetime, &links, &donoGIF, &donoSound, &alertURL, &user.DateEnabled, &user.WalletUploaded, &cryptosEnabled, &defaultCrypto)
+// 	if err != nil {
+// 		return User{}, err
+// 	}
+// 	user.Links = links.String
+// 	if !links.Valid {
+// 		user.Links = ""
+// 	}
+// 	user.DonoGIF = donoGIF.String // assign the sql.NullString to the user's "DonoGIF" field
+// 	if !donoGIF.Valid {           // check if the "dono_gif" column is null
+// 		user.DonoGIF = "default.gif" // set the user's "DonoGIF"
+// 	}
+// 	user.DonoSound = donoSound.String // assign the sql.NullString to the user's "DonoGIF" field
+// 	if !donoSound.Valid {             // check if the "dono_gif" column is null
+// 		user.DonoSound = "default.mp3" // set the user's "DonoSound"
+// 	}
 
-	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
-		user.DefaultCrypto = "" // set the user's "DonoSound"
-	}
+// 	user.DefaultCrypto = defaultCrypto.String // assign the sql.NullString to the user's "DonoGIF" field
+// 	if !defaultCrypto.Valid {                 // check if the "dono_gif" column is null
+// 		user.DefaultCrypto = "" // set the user's "DonoSound"
+// 	}
 
-	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
-	if !alertURL.Valid {            // check if the "dono_gif" column is null
-		user.AlertURL = GenerateUniqueURL() // set the user's "DonoSound"
-	}
+// 	user.AlertURL = alertURL.String // assign the sql.NullString to the user's "DonoGIF" field
+// 	if !alertURL.Valid {            // check if the "dono_gif" column is null
+// 		user.AlertURL = GenerateUniqueURL() // set the user's "DonoSound"
+// 	}
 
-	ce := CryptosEnabled{
-		XMR:   true,
-		SOL:   true,
-		ETH:   false,
-		PAINT: false,
-		HEX:   true,
-		MATIC: false,
-		BUSD:  true,
-		SHIB:  false,
-		PNK:   true,
-	}
+// 	ce := CryptosEnabled{
+// 		XMR:   true,
+// 		SOL:   true,
+// 		ETH:   false,
+// 		PAINT: false,
+// 		HEX:   true,
+// 		MATIC: false,
+// 		BUSD:  true,
+// 		SHIB:  false,
+// 		PNK:   true,
+// 	}
 
-	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
-	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
-		user.CryptosEnabled = ce // set the user's "DonoSound"
-	}
+// 	user.CryptosEnabled = CryptosJsonStringToStruct(cryptosEnabled.String) // assign the sql.NullString to the user's "DonoGIF" field
+// 	if !cryptosEnabled.Valid {                                             // check if the "dono_gif" column is null
+// 		user.CryptosEnabled = ce // set the user's "DonoSound"
+// 	}
 
-	user = ur.SetUserMinDonos(user)
+// 	user = ur.SetUserMinDonos(user)
 
-	return user, nil
+// 	return user, nil
 
-}
+// }
 
 func (ur *UserRepository) CreateNewUserFromPending(user_ PendingUser) error {
 	log.Println("running createNewUserFromPending")
@@ -1166,4 +1167,16 @@ func (ur *UserRepository) ValidateSession(r *http.Request) (int, error) {
 		return 0, fmt.Errorf("invalid session token")
 	}
 	return userID, nil
+}
+
+func (ur *UserRepository) CheckWalletExists(userID int) bool {
+	idstr := strconv.Itoa(userID)
+	up := "users/" + idstr + "/monero/wallet"
+	up_ := "users/" + idstr + "/monero/wallet.keys"
+
+	if CheckFileExists(up) && CheckFileExists(up_) {
+		return true
+	} else {
+		return false
+	}
 }

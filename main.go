@@ -437,6 +437,9 @@ func setupRoutes(ur *models.UserRepository, dr *models.DonoRepository, ir *model
 		{"/replaydono", func(w http.ResponseWriter, r *http.Request) {
 			replayDonoHandler(w, r, dr)
 		}},
+		{"/testdonation", func(w http.ResponseWriter, r *http.Request) {
+			testDonoHandler(w, r, ur, dr)
+		}},
 		{"/progressbar", func(w http.ResponseWriter, r *http.Request) {
 			progressbarOBSHandler(w, r, ur)
 		}},
@@ -494,7 +497,7 @@ func setupRoutes(ur *models.UserRepository, dr *models.DonoRepository, ir *model
 	}
 
 	for _, route_ := range routes_ {
-		http.HandleFunc(route_.Path, logging(route_.Handler, dr))
+		http.HandleFunc(route_.Path, route_.Handler)
 	}
 
 	indexTemplate, _ = template.ParseFiles("web/templates/index.html")
@@ -522,17 +525,31 @@ func setupRoutes(ur *models.UserRepository, dr *models.DonoRepository, ir *model
 	incorrectPasswordTemplate, _ = template.ParseFiles("web/templates/password_change_failed.html")
 }
 
-func logging(f http.HandlerFunc, dr *models.DonoRepository) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/overflow" && r.URL.Path != "/progressbar" && r.URL.Path != "/donations" && r.URL.Path != "/check_donation_status" && r.URL.Path != "/replaydono" && r.URL.Path != "/viewdonos" {
-			ip := models.GetIPAddress(r)
-			matchingIP := dr.CheckRecentIPRequests(ip)
-			if matchingIP >= 200 {
-				http.Redirect(w, r, "/overflow", http.StatusSeeOther)
-				return
-			}
+func testDonoHandler(w http.ResponseWriter, r *http.Request, ur *models.UserRepository, dr *models.DonoRepository) {
+	log.Println("starting testDonoHandler()")
+
+	if r.Method != http.MethodPost {
+		log.Println("testDonoHandler() method is not POST")
+		return
+	}
+
+	user, valid := getLoggedInUser(w, r, ur)
+	username := r.FormValue("username")
+	log.Println("testDonoHandler() username:", username)
+	log.Println("testDonoHandler() user.username:", user.Username)
+
+	if valid && models.CompareStringsLowercase(user.Username, username) {
+		donation := models.Donation{
+			ID:              "123",
+			DonationName:    "John Doe",
+			DonationMessage: "Test message",
+			DonationMedia:   "",
+			USDValue:        "100",
+			AmountSent:      "5",
+			Crypto:          "XMR",
 		}
-		f(w, r)
+
+		dr.ReplayDono(donation, user.UserID)
 	}
 }
 
@@ -1802,8 +1819,6 @@ func paymentHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepos
 	fMessage := r.FormValue("message")
 	fMedia := r.FormValue("media")
 	fShowAmount := r.FormValue("showAmount")
-	encrypted_ip := dr.EncryptIP(ip)
-	log.Println("encrypted_ip", encrypted_ip)
 
 	matching_ips := dr.CheckPendingDonosFromIP(ip)
 
@@ -1869,15 +1884,16 @@ func paymentHandler(w http.ResponseWriter, r *http.Request, dr *models.DonoRepos
 
 	USDAmount := models.GetUSDValue(amount, fCrypto)
 	if fCrypto == "XMR" {
-		dr.CreateNewXMRDono(s.Name, s.Message, s.Media, amount, encrypted_ip)
-		handleMoneroPayment(w, dr, &s, params, amount, encrypted_ip, showAmount, USDAmount, user.UserID)
+		dr.CreateNewXMRDono(s.Name, s.Message, s.Media, amount, ip)
+		handleMoneroPayment(w, dr, &s, params, amount, ip, showAmount, USDAmount, user.UserID)
+
 	} else if fCrypto == "SOL" {
-		new_dono := dr.CreateNewSolDono(s.Name, s.Message, s.Media, models.FuzzDono(amount, "SOL"), encrypted_ip)
-		handleSolanaPayment(w, dr, &s, params, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, media, encrypted_ip, USDAmount, user.UserID)
+		new_dono := dr.CreateNewSolDono(s.Name, s.Message, s.Media, models.FuzzDono(amount, "SOL"), ip)
+		handleSolanaPayment(w, dr, &s, params, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, media, ip, USDAmount, user.UserID)
 	} else {
 		s.Currency = fCrypto
-		new_dono := dr.CreateNewEthDono(s.Name, s.Message, s.Media, amount, fCrypto, encrypted_ip)
-		handleEthereumPayment(w, dr, &s, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, new_dono.MediaURL, fCrypto, encrypted_ip, USDAmount, user.UserID)
+		new_dono := dr.CreateNewEthDono(s.Name, s.Message, s.Media, amount, fCrypto, ip)
+		handleEthereumPayment(w, dr, &s, new_dono.Name, new_dono.Message, new_dono.AmountNeeded, showAmount, new_dono.MediaURL, fCrypto, ip, USDAmount, user.UserID)
 	}
 }
 

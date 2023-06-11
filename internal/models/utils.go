@@ -408,6 +408,14 @@ func CreateObsTable(db *sql.DB) error {
 	return err
 }
 
+func CompareStringsLowercase(str_one, str_two string) bool {
+	if strings.ToLower(str_one) == strings.ToLower(str_two) {
+		return true
+	} else {
+		return false
+	}
+}
+
 func GenerateUniqueURL() string {
 	rand.Seed(time.Now().UnixNano())
 	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -437,7 +445,16 @@ func StartWallets(ur *UserRepository, mr *MoneroRepository, sr *SolRepository) {
 				starting_port++
 
 			} else {
-				log.Println("Monero wallet not uploaded")
+				if ur.CheckWalletExists(user.UserID) {
+					log.Println("Monero wallet uploaded")
+					mr.XmrWallets = append(mr.XmrWallets, []int{user.UserID, starting_port})
+					go mr.StartMoneroWallet(starting_port, user.UserID, user)
+					user.WalletUploaded = true
+					ur.Update(user)
+					starting_port++
+				} else {
+					log.Println("Monero wallet not uploaded")
+				}
 			}
 		} else {
 			log.Println("startWallets() User not valid")

@@ -231,8 +231,6 @@ type DonoRepositoryInterface interface {
 	CheckDonoForMediaUSDThreshold(media_url string, dono_usd float64) (bool, string)
 	ClearEncryptedIP(dono Dono)
 	EncryptIP(ip string) string
-	CheckRecentIPRequests(ip string) int
-	ClearRecentIPS(ip string)
 	PrintTransferInfo(t Transfer)
 	PrintDonoInfo(dono Dono, secondsElapsedSinceLastCheck, secondsNeededToCheck float64)
 	CreateNewEthDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) SuperChat
@@ -443,6 +441,7 @@ func (dr *DonoRepository) CheckUnfulfilled() ([]Dono, error) {
 			timeElapsedFromDonoCreation := time.Since(dono.CreatedAt)
 			if timeElapsedFromDonoCreation > killDono || dono.Address == " " || dono.AmountToSend == "0.0" {
 				dono.Fulfilled = true
+				dono.EncryptedIP = ""
 				if dono.Address == " " {
 					log.Println("No dono address, killed (marked as fulfilled) and won't be checked again.")
 				} else {
@@ -468,6 +467,7 @@ func (dr *DonoRepository) CheckUnfulfilled() ([]Dono, error) {
 						dono.AmountSent = valueStr
 						dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
 						dono.Fulfilled = true
+						dono.EncryptedIP = ""
 						dono.UpdatedAt = time.Now().UTC()
 						fulfilledDonos = append(fulfilledDonos, dono)
 						dr.UpdateInMap(dono)
@@ -507,6 +507,7 @@ func (dr *DonoRepository) CheckUnfulfilled() ([]Dono, error) {
 				dono.AmountSent, _ = PruneStringByDecimalPoints(dono.AmountToSend, 5)
 				dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID)
 				dono.Fulfilled = true
+				dono.EncryptedIP = ""
 				fulfilledDonos = append(fulfilledDonos, dono)
 				dr.UpdateInMap(dono)
 				continue
@@ -516,6 +517,7 @@ func (dr *DonoRepository) CheckUnfulfilled() ([]Dono, error) {
 				dono.AmountSent, _ = PruneStringByDecimalPoints(dono.AmountToSend, 5)
 				dr.AddDonoToDonoBar(dono.AmountSent, dono.CurrencyType, dono.UserID) // change Amount To Send to USD value of sent
 				dono.Fulfilled = true
+				dono.EncryptedIP = ""
 				fulfilledDonos = append(fulfilledDonos, dono)
 				dr.UpdateInMap(dono)
 				continue
@@ -984,29 +986,6 @@ func (dr *DonoRepository) EncryptIP(ip string) string {
 	return string(hashedIP)
 }
 
-func (dr *DonoRepository) CheckRecentIPRequests(ip string) int {
-	matching_ips := 0
-	for _, ip_ := range dr.IpRequests {
-		err := bcrypt.CompareHashAndPassword([]byte(ip_), []byte(ip))
-		if err == nil {
-			matching_ips++
-			if matching_ips == 80 {
-				dr.IpRequests = append(dr.IpRequests, dr.EncryptIP(ip))
-				return matching_ips
-			}
-		}
-	}
-	dr.IpRequests = append(dr.IpRequests, dr.EncryptIP(ip))
-	return matching_ips
-}
-
-func (dr *DonoRepository) ClearRecentIPS(ip string) {
-	for {
-		dr.IpRequests = dr.IpRequests[:0]
-		time.Sleep(5 * time.Minute)
-	}
-}
-
 func (dr *DonoRepository) PrintTransferInfo(t Transfer) {
 	fmt.Printf("Block Number: %v\nUnique ID: %v\nHash: %v\nFrom: %v\nTo: %v\nValue: %v\nERC721 Token ID: %v\nERC1155 Metadata: %v\nToken ID: %v\nAsset: %v\nCategory: %v\n",
 		t.BlockNum,
@@ -1031,8 +1010,8 @@ func (dr *DonoRepository) PrintDonoInfo(dono Dono, secondsElapsedSinceLastCheck,
 
 }
 
-func (dr *DonoRepository) CreateNewEthDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, encrypted_ip string) SuperChat {
-	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, cryptoCode, encrypted_ip)
+func (dr *DonoRepository) CreateNewEthDono(name string, message string, mediaURL string, amountNeeded float64, cryptoCode string, ip string) SuperChat {
+	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, cryptoCode, ip)
 	dr.PendingDonos = AppendPendingDono(dr.PendingDonos, new_dono)
 
 	return new_dono
@@ -1053,14 +1032,14 @@ func (dr *DonoRepository) CheckPendingDonosFromIP(ip string) int {
 	return matching_ips
 }
 
-func (dr *DonoRepository) CreateNewSolDono(name string, message string, mediaURL string, amountNeeded float64, encrypted_ip string) SuperChat {
-	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, "SOL", encrypted_ip)
+func (dr *DonoRepository) CreateNewSolDono(name string, message string, mediaURL string, amountNeeded float64, ip string) SuperChat {
+	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, "SOL", ip)
 	dr.PendingDonos = AppendPendingDono(dr.PendingDonos, new_dono)
 
 	return new_dono
 }
 
-func (dr *DonoRepository) CreateNewXMRDono(name string, message string, mediaURL string, amountNeeded float64, encrypted_ip string) {
-	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, "XMR", encrypted_ip)
+func (dr *DonoRepository) CreateNewXMRDono(name string, message string, mediaURL string, amountNeeded float64, ip string) {
+	new_dono := CreatePendingDono(name, message, mediaURL, amountNeeded, "XMR", ip)
 	dr.PendingDonos = AppendPendingDono(dr.PendingDonos, new_dono)
 }

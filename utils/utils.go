@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 var contracts = map[string]string{
@@ -81,6 +79,14 @@ var cryptoMap = map[string]map[string]interface{}{
 func GetTransactionAmount(t Transfer) string {
 	d := decimal.NewFromFloat(t.Value)
 	return d.String()
+}
+
+func CompareStringsLowercase(str_one, str_two string) bool {
+	if strings.ToLower(str_one) == strings.ToLower(str_two) {
+		return true
+	} else {
+		return false
+	}
 }
 
 func IsPortOpen(port int) bool {
@@ -235,9 +241,7 @@ func AppendPendingDono(pending_donos []SuperChat, new_dono SuperChat) []SuperCha
 func CheckPendingDonosFromIP(pending_donos []SuperChat, ip string) int {
 	matching_ips := 0
 	for _, dono := range pending_donos {
-		err := bcrypt.CompareHashAndPassword([]byte(dono.EncryptedIP), []byte(ip))
-
-		if err == nil {
+		if ip == dono.EncryptedIP {
 			matching_ips++
 			if matching_ips == 15 {
 				return matching_ips

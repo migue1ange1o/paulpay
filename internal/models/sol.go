@@ -280,6 +280,11 @@ func (sr *SolRepository) CheckSameBalanceSol(wallet SolWallet) (SolWallet, bool)
 }
 
 func (sr *SolRepository) GetSOLBalance(address string) (float64, error) {
+
+	if address == "" {
+		return 0, nil
+	}
+
 	balance, err := solClient.GetBalance(
 		context.TODO(), // request context
 		address,        // wallet to fetch balance for
